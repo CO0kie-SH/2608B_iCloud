@@ -9,6 +9,7 @@ from tools.config import load_settings
 from tools.db import AliasDB
 from tools.hme import HMEService
 from tools.mail import ICloudMailClient, get_mail_by_uid
+from tools.rate_limit import HME_CREATE_LIMIT_PER_HOUR, HMECreateRateLimitError
 
 
 def get_db() -> AliasDB:
@@ -108,32 +109,50 @@ def cmd_db(args: argparse.Namespace) -> int:
 
 def cmd_generate(args: argparse.Namespace) -> int:
     settings, account = _pick_account(args.account)
+    db = get_db()
     try:
         with ICloudHMEClient(settings, account.cookies) as client:
-            svc = HMEService(client)
-            alias = svc.create_alias(label=args.label, note=args.note)
-    except (ICloudError, RuntimeError) as e:
+            svc = HMEService(client, db=db)
+            alias = svc.create_alias(
+                account=account.name,
+                label=args.label,
+                note=args.note,
+            )
+    except HMECreateRateLimitError as e:
+        print(f"[{account.name}] 拒绝创建（规矩：1小时最多{HME_CREATE_LIMIT_PER_HOUR}个）: {e}")
+        return 2
+    except (ICloudError, RuntimeError, ValueError) as e:
         print(f"[{account.name}] 生成失败: {e}")
         return 1
-
-    db = get_db()
-    db.upsert_alias(
-        account=account.name,
-        hme=alias.hme,
-        label=alias.label,
-        anonymous_id=alias.anonymous_id,
-        is_active=alias.is_active,
-        create_timestamp=alias.create_timestamp,
-        note=args.note,
-        source="generate",
-        raw=alias.raw,
-    )
 
     print(f"[{account.name}] 生成成功: {alias.hme}")
     print(f"  label={alias.label}")
     if alias.anonymous_id:
         print(f"  id={alias.anonymous_id}")
+    q = db.get_create_quota(account.name)
+    print(f"  quota: {q.used}/{q.limit} in 1h, remaining={q.remaining}")
     print(f"  saved -> {db.db_path}")
+    return 0
+
+
+def cmd_quota(args: argparse.Namespace) -> int:
+    db = get_db()
+    settings = load_settings()
+    _, accounts = load_all_accounts(settings.accounts_files, settings.base_dir)
+    targets = accounts
+    if args.account:
+        acc = find_account(accounts, args.account)
+        if not acc:
+            print(f"未找到账户: {args.account}")
+            return 1
+        targets = [acc]
+
+    print(f"规矩: 每账户滚动1小时最多创建 {HME_CREATE_LIMIT_PER_HOUR} 个隐私邮箱")
+    for acc in targets:
+        q = db.get_create_quota(acc.name)
+        print(f"[{acc.name}] used={q.used}/{q.limit} remaining={q.remaining} retry_after={q.retry_after_sec}s")
+        for ev in q.recent:
+            print(f"  - {ev['created_at']}  {ev['hme']}  label={ev['label']}")
     return 0
 
 
@@ -283,11 +302,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_db.add_argument("-a", "--account", help="按账户过滤")
     p_db.set_defaults(func=cmd_db)
 
-    p_gen = sub.add_parser("generate", help="生成并保留一个 HME 别名")
+    p_gen = sub.add_parser("generate", help="生成并保留一个 HME 别名（受1小时5个限制）")
     p_gen.add_argument("-a", "--account", help="账户备注名")
     p_gen.add_argument("-l", "--label", help="别名标签，默认 Alias_XXXX")
     p_gen.add_argument("-n", "--note", default="由 2608B_iCloud 生成", help="备注")
     p_gen.set_defaults(func=cmd_generate)
+
+    p_quota = sub.add_parser("quota", help="查看 HME 创建配额（1小时5个）")
+    p_quota.add_argument("-a", "--account", help="账户/邮箱")
+    p_quota.set_defaults(func=cmd_quota)
 
     p_on = sub.add_parser("on", help="恢复别名转发")
     p_on.add_argument("anonymous_id", help="anonymousId")

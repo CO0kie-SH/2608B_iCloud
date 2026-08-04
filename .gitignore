@@ -1,0 +1,24 @@
+# secrets / privacy
+.env
+accounts/*
+!accounts/_example.txt.example
+db/
+*.db
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ide / os
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# local dumps
+mail_dump.txt
+_*.py
