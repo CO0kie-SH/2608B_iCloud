@@ -1,9 +1,13 @@
 # secrets / privacy
 .env
 accounts/*
-!accounts/_example.txt.example
+!accounts/_example.yaml.example
 db/
 *.db
+
+# local browser binaries + run logs
+browsers/
+logs/
 
 # python
 __pycache__/

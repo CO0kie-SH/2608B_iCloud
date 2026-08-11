@@ -23,7 +23,17 @@ def main() -> int:
         "--account",
         help="主邮箱/账户名；仅一个账户时可省略",
     )
-    parser.add_argument("-l", "--label", help="别名标签，默认 Alias_XXXX")
+    parser.add_argument(
+        "-l",
+        "--label",
+        help="别名标签；默认 CDK_<sha256_hex>",
+    )
+    parser.add_argument(
+        "--cdk-hex-len",
+        type=int,
+        default=64,
+        help="默认 cdk 的 sha256 hex 长度，8-64，默认 64",
+    )
     parser.add_argument(
         "-n",
         "--note",
@@ -71,6 +81,7 @@ def main() -> int:
                 account=acc.name,
                 label=args.label,
                 note=args.note,
+                cdk_hex_len=args.cdk_hex_len,
             )
     except HMECreateRateLimitError as e:
         print(f"ERROR: 拒绝创建（规矩：1小时最多{HME_CREATE_LIMIT_PER_HOUR}个）: {e}")

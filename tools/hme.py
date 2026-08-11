@@ -1,15 +1,45 @@
 from __future__ import annotations
 
-import random
-import string
+import hashlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from .client import ICloudHMEClient
 from .rate_limit import HME_CREATE_LIMIT_PER_HOUR, HMECreateRateLimitError
+from .secure_random import random_backend_info, secure_random_bytes
 
 if TYPE_CHECKING:
     from .db import AliasDB
+
+# label: CDK_<sha256_hex>
+# - 随机源：按系统切换（Linux getrandom//dev/urandom，Windows/macOS secrets）
+# - sha256: 固定长度、不可预测
+# - 默认 64 位完整 hex；可截断到 16/32（仍建议 >=16）
+CDK_PREFIX = "CDK_"
+CDK_HEX_LEN_DEFAULT = 64
+CDK_HEX_LEN_MIN = 8
+CDK_HEX_LEN_MAX = 64
+CDK_LABEL_MAX = 256  # Apple 实测至少支持 256
+
+
+def generate_cdk_label(hex_len: int = CDK_HEX_LEN_DEFAULT) -> str:
+    """
+    生成隐私邮箱标签：CDK_<sha256_hex>
+
+    熵来源：secure_random_bytes(32)（按 OS 切换安全随机接口）
+    编码：SHA256 十六进制，默认完整 64 字符
+    示例：CDK_a3f1...（总长 4+64=68）
+    """
+    n = int(hex_len)
+    if n < CDK_HEX_LEN_MIN or n > CDK_HEX_LEN_MAX:
+        raise ValueError(f"hex_len must be in [{CDK_HEX_LEN_MIN}, {CDK_HEX_LEN_MAX}]")
+
+    digest = hashlib.sha256(secure_random_bytes(32)).hexdigest()
+    body = digest[:n]
+    label = f"{CDK_PREFIX}{body}"
+    if len(label) > CDK_LABEL_MAX:
+        raise ValueError(f"label too long: {len(label)} > {CDK_LABEL_MAX}")
+    return label
 
 
 @dataclass
@@ -75,12 +105,14 @@ class HMEService:
         note: str = "由 2608B_iCloud 生成",
         lang: str = "zh-cn",
         db: AliasDB | None = None,
+        cdk_hex_len: int = CDK_HEX_LEN_DEFAULT,
     ) -> HMEAlias:
         """
         创建并保留一个 HME 别名。
 
         必须提供 account；db 用于限流检查与 create_events 记账。
         规则：1 小时内最多创建 5 个（每账户）。
+        默认 label：CDK_<sha256_hex>（按系统安全随机 + SHA256）。
         """
         if not account or not str(account).strip():
             raise ValueError("create_alias 必须提供 account（用于限流）")
@@ -105,8 +137,9 @@ class HMEService:
 
         hme = gen["result"]["hme"]
         if not label:
-            suffix = "".join(random.choices(string.ascii_uppercase + string.digits, k=4))
-            label = f"Alias_{suffix}"
+            label = generate_cdk_label(hex_len=cdk_hex_len)
+        elif len(label) > CDK_LABEL_MAX:
+            raise ValueError(f"label 长度 {len(label)} 超过上限 {CDK_LABEL_MAX}")
 
         res = self.reserve(hme=hme, label=label, note=note)
         if not res.get("success"):
@@ -138,12 +171,21 @@ class HMEService:
                 raw=res if isinstance(res, dict) else None,
             )
 
-        # 成功后记账（限流）+ 写入 aliases 表
-        created_at = store.record_create_event(account, hme=alias.hme, label=alias.label)
-        store.upsert_alias(
-            account=account,
+        # 成功后记账（限流）+ 写入 aliases（CDK -> 隐私邮箱 + 母号）
+        cdk = alias.label if str(alias.label).startswith("CDK_") else label
+        created_at = store.record_create_event(
+            account,
             hme=alias.hme,
             label=alias.label,
+            cdk=cdk,
+            parent_mail=account,
+        )
+        store.upsert_alias(
+            account=account,
+            parent_mail=account,
+            hme=alias.hme,
+            label=alias.label,
+            cdk=cdk,
             anonymous_id=alias.anonymous_id,
             is_active=alias.is_active,
             create_timestamp=alias.create_timestamp,
@@ -152,6 +194,7 @@ class HMEService:
             raw=alias.raw,
         )
         print(f"[rate-limit] recorded create_event at {created_at} for {alias.hme}")
+        print(f"[cdk-map] {cdk} -> hme={alias.hme} parent={account}")
         return alias
 
     def deactivate(self, anonymous_id: str) -> dict[str, Any]:
@@ -177,4 +220,8 @@ __all__ = [
     "HMEService",
     "HMECreateRateLimitError",
     "HME_CREATE_LIMIT_PER_HOUR",
+    "generate_cdk_label",
+    "CDK_PREFIX",
+    "CDK_HEX_LEN_DEFAULT",
+    "random_backend_info",
 ]

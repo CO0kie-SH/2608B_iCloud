@@ -1,2 +1,4 @@
 python-dotenv>=1.0.0
 requests>=2.31.0
+PyYAML>=6.0
+camoufox[geoip]>=0.4.11

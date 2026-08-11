@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 
+# 兼容旧常量（默认 iCloud）
 IMAP_HOST = "imap.mail.me.com"
 IMAP_PORT = 993
 SMTP_HOST = "smtp.mail.me.com"
@@ -26,6 +27,71 @@ DEFAULT_FOLDERS = (
     "Sent Messages",
     "Drafts",
 )
+
+DEFAULT_FOLDERS_163 = (
+    "INBOX",
+    "Drafts",
+    "Sent Messages",
+    "Deleted Messages",
+    "Junk",
+)
+
+
+@dataclass(frozen=True)
+class MailServerProfile:
+    """某一邮件服务商的 IMAP/SMTP 连接参数。"""
+
+    name: str
+    imap_host: str
+    imap_port: int = 993
+    smtp_host: str = ""
+    smtp_port: int = 587
+    # True: SMTP_SSL；False: 明文连上后 STARTTLS
+    smtp_ssl: bool = False
+    smtp_starttls: bool = True
+    # 网易等要求登录后发 IMAP ID
+    need_imap_id: bool = False
+    folders: tuple[str, ...] = DEFAULT_FOLDERS
+
+
+MAIL_SERVER_PROFILES: dict[str, MailServerProfile] = {
+    "apple": MailServerProfile(
+        name="apple",
+        imap_host="imap.mail.me.com",
+        imap_port=993,
+        smtp_host="smtp.mail.me.com",
+        smtp_port=587,
+        smtp_ssl=False,
+        smtp_starttls=True,
+        need_imap_id=False,
+        folders=DEFAULT_FOLDERS,
+    ),
+    "163mail": MailServerProfile(
+        name="163mail",
+        imap_host="imap.163.com",
+        imap_port=993,
+        smtp_host="smtp.163.com",
+        smtp_port=465,
+        smtp_ssl=True,
+        smtp_starttls=False,
+        need_imap_id=True,
+        folders=DEFAULT_FOLDERS_163,
+    ),
+}
+# 别名
+MAIL_SERVER_PROFILES["icloud"] = MAIL_SERVER_PROFILES["apple"]
+MAIL_SERVER_PROFILES["163"] = MAIL_SERVER_PROFILES["163mail"]
+
+
+def resolve_mail_profile(provider: str | None) -> MailServerProfile:
+    """provider 名 → 服务器配置；未知则按 apple。"""
+    key = (provider or "apple").strip().lower()
+    if key in MAIL_SERVER_PROFILES:
+        return MAIL_SERVER_PROFILES[key]
+    # inbox 兜底：历史逻辑多用 apple 密码
+    if key == "inbox":
+        return MAIL_SERVER_PROFILES["apple"]
+    return MAIL_SERVER_PROFILES["apple"]
 
 
 @dataclass
@@ -137,6 +203,121 @@ class MailMessageParser:
             out["size"] = int(m.group(1))
         return out
 
+    @staticmethod
+    def html_to_text(html: str) -> str:
+        if not html:
+            return ""
+        text = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", html)
+        text = re.sub(r"(?i)<br\s*/?>", "\n", text)
+        text = re.sub(r"(?i)</p\s*>", "\n", text)
+        text = re.sub(r"(?i)</div\s*>", "\n", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
+        text = (
+            text.replace("&nbsp;", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&amp;", "&")
+            .replace("&quot;", '"')
+            .replace("&#39;", "'")
+        )
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n\s*\n+", "\n", text)
+        return text.strip()
+
+    @classmethod
+    def plain_content(cls, text_body: str, html_body: str) -> str:
+        if text_body and text_body.strip():
+            return text_body.strip()
+        return cls.html_to_text(html_body)
+
+    @classmethod
+    def extract_code(cls, subject: str, content: str) -> str:
+        blob = f"{subject}\n{content}"
+        patterns = [
+            r"(?:验证码|校验码|动态码|安全码|临时验证码|verification code|verify code|security code|one[- ]?time(?: code| password)?|otp|auth(?:entication)? code)[^\d]{0,20}(\d{4,8})",
+            r"(?:code|验证码)\s*[:：是为]?\s*(\d{4,8})",
+            r"\b(\d{6})\b",
+        ]
+        for pat in patterns:
+            m = re.search(pat, blob, flags=re.I)
+            if m:
+                return m.group(1)
+        return ""
+
+    @classmethod
+    def classify_type(cls, subject: str, from_addr: str, content: str) -> str:
+        subj = subject or ""
+        frm = from_addr or ""
+        body = content or ""
+        blob = f"{subj}\n{frm}\n{body}".lower()
+
+        code = cls.extract_code(subj, body)
+        code_hints = (
+            "验证码",
+            "校验码",
+            "动态码",
+            "临时验证码",
+            "verification code",
+            "verify code",
+            "security code",
+            "one-time",
+            "one time",
+            "otp",
+            "auth code",
+            "authentication code",
+        )
+        if code or any(h in blob for h in code_hints):
+            return "code"
+
+        if any(k in blob for k in ("欢迎", "welcome", "getting started", "开始使用")):
+            return "welcome"
+        if any(k in blob for k in ("家人共享", "family sharing", "家庭共享", "受邀加入")):
+            return "invite"
+        if any(k in blob for k in ("password reset", "reset password", "重置密码", "找回密码")):
+            return "security"
+        if any(k in blob for k in ("invoice", "receipt", "账单", "发票", "payment")):
+            return "billing"
+        if any(k in blob for k in ("unsubscribe", "newsletter", "促销", "优惠", "discount")):
+            return "promo"
+        return "other"
+
+    @classmethod
+    def make_summary(
+        cls,
+        *,
+        mail_type: str,
+        subject: str,
+        from_addr: str,
+        to_addr: str,
+        content: str,
+        code: str = "",
+        max_len: int = 180,
+    ) -> str:
+        content_one = re.sub(r"\s+", " ", content or "").strip()
+        if mail_type == "code":
+            if code:
+                return f"验证码 {code}" + (f"（{subject}）" if subject else "")
+            # fallback: first digits already failed
+            return subject or content_one[:max_len] or "验证码邮件"
+        if mail_type == "welcome":
+            return subject or content_one[:max_len] or "欢迎邮件"
+        if mail_type == "invite":
+            return subject or f"邀请邮件 from {from_addr}" if from_addr else "邀请邮件"
+
+        parts: list[str] = []
+        if subject:
+            parts.append(subject)
+        elif content_one:
+            parts.append(content_one[:max_len])
+        if from_addr and not parts:
+            parts.append(f"from {from_addr}")
+        if to_addr and "Hide My Email" in to_addr:
+            parts.append(f"to {to_addr}")
+        summary = " | ".join(parts) if parts else "(empty)"
+        if len(summary) > max_len:
+            summary = summary[: max_len - 1] + "…"
+        return summary
+
     @classmethod
     def to_dict(
         cls,
@@ -158,6 +339,21 @@ class MailMessageParser:
         except Exception:
             date_parsed = ""
 
+        subject = cls.header(msg, "Subject")
+        from_addr = cls.header(msg, "From")
+        to_addr = cls.header(msg, "To")
+        plain = cls.plain_content(text_body, html_body)
+        mail_type = cls.classify_type(subject, from_addr, plain)
+        code = cls.extract_code(subject, plain) if mail_type == "code" else ""
+        summary = cls.make_summary(
+            mail_type=mail_type,
+            subject=subject,
+            from_addr=from_addr,
+            to_addr=to_addr,
+            content=plain,
+            code=code,
+        )
+
         body_text_out = text_body
         body_html_out = html_body
         if body_limit and body_limit > 0:
@@ -174,16 +370,19 @@ class MailMessageParser:
             "date": date_header,
             "date_parsed": date_parsed,
             "internaldate": meta.get("internaldate") or "",
-            "from": cls.header(msg, "From"),
-            "to": cls.header(msg, "To"),
+            "from": from_addr,
+            "to": to_addr,
             "cc": cls.header(msg, "Cc"),
             "bcc": cls.header(msg, "Bcc"),
             "reply_to": cls.header(msg, "Reply-To"),
-            "subject": cls.header(msg, "Subject"),
+            "subject": subject,
             "message_id": cls.header(msg, "Message-ID"),
             "in_reply_to": cls.header(msg, "In-Reply-To"),
             "references": cls.header(msg, "References"),
             "content_type": msg.get_content_type() or "",
+            "type": mail_type,
+            "summary": summary,
+            "code": code,
             "attachments": attachments,
             "body_text": body_text_out if include_body else "",
             "body_html": body_html_out if include_body else "",
@@ -193,23 +392,116 @@ class MailMessageParser:
 
 
 class ICloudMailClient:
-    """iCloud 邮件客户端（IMAP 收信 / SMTP 发信）。"""
+    """
+    多 provider 邮件客户端（IMAP 收信 / SMTP 发信）。
 
-    def __init__(self, mail: str, app_password: str, timeout: float = 30.0) -> None:
+    provider:
+      - apple / icloud → imap.mail.me.com
+      - 163mail / 163  → imap.163.com（登录后发 IMAP ID）
+    类名保留 ICloudMailClient 以兼容旧导入；也可用 MailClient 别名。
+    """
+
+    def __init__(
+        self,
+        mail: str,
+        app_password: str,
+        timeout: float = 30.0,
+        *,
+        provider: str = "apple",
+        profile: MailServerProfile | None = None,
+    ) -> None:
         if not mail or not app_password:
             raise ValueError("mail 与 app_password 不能为空")
         self.mail = mail
         self.app_password = app_password.replace(" ", "")
         self.timeout = timeout
+        self.provider = (provider or "apple").strip().lower()
+        self.profile = profile or resolve_mail_profile(self.provider)
         self.parser = MailMessageParser()
 
+    def _imap_id(self, imap: imaplib.IMAP4) -> None:
+        """
+        网易邮箱要求 LOGIN 后发送 IMAP ID，否则 SELECT 报：
+        Unsafe Login. Please contact kefu@188.com for help
+
+        用 xatom 自动登记扩展命令（标准库默认无 ID）。
+        """
+        payloads = (
+            '("name" "2608B_iCloud" "version" "1.0.0" "vendor" "2608B" "support-email" "support@local")',
+            '("name" "IMAPClient" "version" "2.3.1" "vendor" "python" "support-email" "support@local")',
+        )
+        last: tuple[str, object] | None = None
+        for payload in payloads:
+            try:
+                # xatom 会把 ID 登记进 Commands，避免 illegal command / KeyError
+                typ, data = imap.xatom("ID", payload)
+            except Exception as e:
+                last = ("exc", e)
+                continue
+            last = (str(typ), data)
+            if typ == "OK":
+                return
+        raise RuntimeError(f"IMAP ID failed: {last}")
+
     def _connect_imap(self) -> imaplib.IMAP4_SSL:
-        imap = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=self.timeout)
+        host = self.profile.imap_host
+        port = self.profile.imap_port
+        imap = imaplib.IMAP4_SSL(host, port, timeout=self.timeout)
         typ, _ = imap.login(self.mail, self.app_password)
         if typ != "OK":
-            imap.logout()
-            raise RuntimeError(f"IMAP login failed: {typ}")
+            try:
+                imap.logout()
+            except Exception:
+                pass
+            raise RuntimeError(f"IMAP login failed: {typ} ({host})")
+        if self.profile.need_imap_id:
+            try:
+                self._imap_id(imap)
+            except Exception as e:
+                try:
+                    imap.logout()
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"IMAP ID (网易安全登录) 失败: {e}; host={host}"
+                ) from e
         return imap
+
+    def _smtp_login(self, smtp: smtplib.SMTP) -> None:
+        smtp.login(self.mail, self.app_password)
+
+    def _connect_smtp(self) -> smtplib.SMTP:
+        """
+        连接 SMTP。163 优先 465 SSL，失败再试 587 STARTTLS（部分网络封 465）。
+        """
+        context = ssl.create_default_context()
+        host = self.profile.smtp_host
+        attempts: list[tuple[str, int, str]] = []
+        if self.profile.smtp_ssl:
+            attempts.append(("ssl", self.profile.smtp_port, host))
+            # 163 常见备选
+            if self.profile.name == "163mail" and self.profile.smtp_port != 587:
+                attempts.append(("starttls", 587, host))
+        else:
+            attempts.append(("starttls" if self.profile.smtp_starttls else "plain", self.profile.smtp_port, host))
+
+        errors: list[str] = []
+        for mode, port, h in attempts:
+            try:
+                if mode == "ssl":
+                    smtp = smtplib.SMTP_SSL(h, port, timeout=self.timeout, context=context)
+                    smtp.ehlo()
+                else:
+                    smtp = smtplib.SMTP(h, port, timeout=self.timeout)
+                    smtp.ehlo()
+                    if mode == "starttls":
+                        smtp.starttls(context=context)
+                        smtp.ehlo()
+                self._smtp_login(smtp)
+                return smtp
+            except Exception as e:
+                errors.append(f"{mode}:{h}:{port} -> {type(e).__name__}: {e}")
+        raise RuntimeError("SMTP connect failed: " + " | ".join(errors))
 
     @staticmethod
     def _mailbox_arg(mailbox: str) -> str:
@@ -222,22 +514,29 @@ class ICloudMailClient:
                 if typ != "OK":
                     return MailProbeResult(False, f"select INBOX failed: {typ}")
                 count = int(data[0]) if data and data[0] else 0
-                return MailProbeResult(True, f"INBOX messages={count}")
+                return MailProbeResult(
+                    True,
+                    f"INBOX messages={count} via {self.profile.imap_host} ({self.profile.name})",
+                )
         except Exception as e:
             return MailProbeResult(False, f"{type(e).__name__}: {e}")
 
     def probe_smtp(self) -> MailProbeResult:
         try:
-            context = ssl.create_default_context()
-            with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=self.timeout) as smtp:
-                smtp.ehlo()
-                smtp.starttls(context=context)
-                smtp.ehlo()
-                smtp.login(self.mail, self.app_password)
-            return MailProbeResult(True, "SMTP auth OK")
+            smtp = self._connect_smtp()
+            try:
+                smtp.quit()
+            except Exception:
+                try:
+                    smtp.close()
+                except Exception:
+                    pass
+            return MailProbeResult(
+                True,
+                f"SMTP auth OK via {self.profile.smtp_host}:{self.profile.smtp_port} ({self.profile.name})",
+            )
         except Exception as e:
             return MailProbeResult(False, f"{type(e).__name__}: {e}")
-
     def list_folders(self) -> list[str]:
         with self._connect_imap() as imap:
             typ, data = imap.list()
@@ -357,13 +656,45 @@ class ICloudMailClient:
         msg["Subject"] = subject
         msg.set_content(body)
 
-        context = ssl.create_default_context()
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=self.timeout) as smtp:
-            smtp.ehlo()
-            smtp.starttls(context=context)
-            smtp.ehlo()
-            smtp.login(self.mail, self.app_password)
+        smtp = self._connect_smtp()
+        try:
             smtp.send_message(msg)
+        finally:
+            try:
+                smtp.quit()
+            except Exception:
+                try:
+                    smtp.close()
+                except Exception:
+                    pass
+
+
+def mail_client_from_endpoint(
+    mail: str,
+    password: str,
+    provider: str = "apple",
+    timeout: float = 30.0,
+) -> ICloudMailClient:
+    return ICloudMailClient(mail, password, timeout=timeout, provider=provider)
+
+
+def mail_client_from_account(account: Any, timeout: float = 30.0) -> ICloudMailClient:
+    """从 Account.resolve_inbox() 构建客户端。"""
+    endpoint = account.resolve_inbox()
+    if not endpoint or not endpoint.ready:
+        raise ValueError(
+            f"account mail credentials incomplete: {getattr(account, 'name', '?')}"
+        )
+    return ICloudMailClient(
+        endpoint.mail,
+        endpoint.password,
+        timeout=timeout,
+        provider=endpoint.name,
+    )
+
+
+# 对外别名
+MailClient = ICloudMailClient
 
 
 class MailService:
@@ -393,7 +724,7 @@ class MailService:
 
     def get_client(self, mail: str) -> ICloudMailClient:
         acc = self._load_account(mail)
-        return ICloudMailClient(acc.mail, acc.app_password)
+        return mail_client_from_account(acc)
 
     def get_mail(
         self,

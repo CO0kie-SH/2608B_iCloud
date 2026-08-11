@@ -1,0 +1,79 @@
+# =============================================================================
+# 账户模板（复制后改名）
+# =============================================================================
+# 文件名：建议用主标识邮箱
+#   user001@icloud.com.yaml
+#   user001@icloud.com.yml          # .yml / .yaml 都支持
+#
+# 一文件 = 一账户配置。可按需「缩减」：用不到的块整段删掉即可。
+#
+# 根字段
+#   mail     账户主标识（母号/对外名称）。文件名含 @ 时也应与之一致。
+#
+# 可选块
+#   apple    Apple / iCloud（HME Cookie + App 专用密码）
+#   163mail  网易 163（授权码 IMAP；后续可扩更多邮箱）
+#   inbox    指定默认收件箱用哪套邮箱（填某个 provider 的 mail）
+#
+# 后续扩展：qqmail / gmail / outlook ... 同样按「块名 + mail + 凭证」加即可。
+# =============================================================================
+
+# ---------- 完整示例（Apple HME + 163 + 指定收件箱）----------
+mail: user001@icloud.com
+
+apple:
+  # Apple ID 登录邮箱（可与 mail 不同）
+  appleid: user001@xxx.com
+  # appleid.apple.com 生成的 App 专用密码（iCloud IMAP/SMTP）
+  app_password: xxxx-xxxx-xxxx-xxxx
+  # 浏览器登录 icloud.com 后的完整 Cookie（HME 必填）
+  # 含 : ; = 等字符时请用双引号包住
+  cookie: "X-APPLE-WEBAUTH-TOKEN=...; X-APPLE-WEBAUTH-USER=...; X-APPLE-DS-WEB-SESSION-TOKEN=...; X-APPLE-WEBAUTH-LOGIN=..."
+
+163mail:
+  mail: user001@163.com
+  # 163 邮箱「客户端授权码」，不是登录密码
+  imap: abcdefg
+
+# 默认收信账户：填上面某一套的 mail
+inbox:
+  mail: user001@163.com
+
+# =============================================================================
+# 缩减格式示例（复制时只留一种；不要和上面完整示例叠在同一文件里）
+# =============================================================================
+#
+# 1) 只要 iCloud HME + 邮件（嵌套 apple，无其它邮箱）
+#
+# mail: user001@icloud.com
+# apple:
+#   appleid: user001@icloud.com
+#   app_password: xxxx-xxxx-xxxx-xxxx
+#   cookie: "X-APPLE-...; ..."
+#
+# 2) 只要 HME（不配邮件）
+#
+# mail: user001@icloud.com
+# apple:
+#   cookie: "X-APPLE-...; ..."
+#
+# 3) 扁平缩减（兼容旧写法，等价于只有 apple）
+#
+# mail: user001@icloud.com
+# app_password: xxxx-xxxx-xxxx-xxxx
+# cookie: "X-APPLE-...; ..."
+#
+# 4) 只要 163 收信（无 HME；HME 相关命令会不可用）
+#
+# mail: user001@163.com
+# 163mail:
+#   mail: user001@163.com
+#   imap: abcdefg
+# inbox:
+#   mail: user001@163.com
+#
+# Cookie 必填键（apple.cookie / 扁平 cookie）：
+#   X-APPLE-WEBAUTH-TOKEN
+#   X-APPLE-WEBAUTH-USER
+#   X-APPLE-DS-WEB-SESSION-TOKEN
+#   X-APPLE-WEBAUTH-LOGIN

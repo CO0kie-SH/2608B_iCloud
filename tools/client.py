@@ -67,6 +67,11 @@ class ICloudHMEClient:
 
         if resp.status_code < 200 or resp.status_code >= 300:
             body = resp.text[:300].replace("\n", " ")
+            if resp.status_code == 421:
+                raise ICloudError(
+                    "HTTP 421: Cookie 已失效，请执行 "
+                    "python main.py cookie-login -a <账户> 重新采集"
+                )
             raise ICloudError(f"HTTP {resp.status_code}: {body}")
 
         if not resp.text:
@@ -83,7 +88,7 @@ class ICloudHMEClient:
         url = f"{self.settings.setup_host}/setup/ws/1/validate?{self._client_query()}"
         data = self._request("POST", url)
         if not isinstance(data, dict) or "webservices" not in data:
-            raise ICloudError("凭证已失效，请重新登录并更新 accounts/*.txt")
+            raise ICloudError("凭证已失效，请重新登录并更新 accounts/*.yml")
 
         ws = data["webservices"]
         candidates = ("maildomainws", "premiummailsettings")

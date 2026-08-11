@@ -2,13 +2,22 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from tools.accounts import find_account, load_all_accounts
+from tools.camoufox_runtime import (
+    CamoufoxRuntimeError,
+    browser_status,
+    fetch_browser,
+    resolve_camoufox_dir,
+)
 from tools.client import ICloudError, ICloudHMEClient
 from tools.config import load_settings
+from tools.cookie_capture import CookieCaptureOptions, capture_icloud_cookie
 from tools.db import AliasDB
 from tools.hme import HMEService
-from tools.mail import ICloudMailClient, get_mail_by_uid
+from tools.logging_setup import setup_logger
+from tools.mail import ICloudMailClient, get_mail_by_uid, mail_client_from_account
 from tools.rate_limit import HME_CREATE_LIMIT_PER_HOUR, HMECreateRateLimitError
 
 
@@ -31,7 +40,15 @@ def cmd_accounts(_: argparse.Namespace) -> int:
         print(f"  - {a.summary()}")
         if a.format_errors:
             print(f"    format: {'; '.join(a.format_errors)}")
-        print(f"    mail={a.mail or '-'}  app_pwd={'set' if a.app_password else 'MISSING'}  mail_ready={a.mail_ready}")
+        prov_names = ", ".join(sorted(a.providers.keys())) or "-"
+        inbox = a.resolve_inbox()
+        inbox_s = f"{inbox.name}:{inbox.mail}" if inbox and inbox.mail else "-"
+        apple_s = a.apple_id or "-"
+        print(
+            f"    mail={a.mail or '-'}  appleid={apple_s}  "
+            f"providers=[{prov_names}]  inbox={inbox_s}  "
+            f"hme_ok={a.ok}  mail_ready={a.mail_ready}"
+        )
         if settings.debug and a.cookies:
             preview = a.cookies[:60] + ("..." if len(a.cookies) > 60 else "")
             print(f"    cookie: {preview}")
@@ -75,8 +92,10 @@ def cmd_list(args: argparse.Namespace) -> int:
     for a in aliases:
         db.upsert_alias(
             account=account.name,
+            parent_mail=account.mail or account.name,
             hme=a.hme,
             label=a.label,
+            cdk=a.label if str(a.label).startswith("CDK_") else None,
             anonymous_id=a.anonymous_id,
             is_active=a.is_active,
             create_timestamp=a.create_timestamp,
@@ -101,9 +120,32 @@ def cmd_db(args: argparse.Namespace) -> int:
     for r in rows:
         state = "ON" if r.is_active else "OFF"
         print(
-            f"  #{r.id} [{state}] {r.hme}  account={r.account}  "
-            f"label={r.label}  id={r.anonymous_id}  at={r.created_at}"
+            f"  #{r.id} [{state}] cdk={r.cdk or '-'}  hme={r.hme}  "
+            f"parent={r.parent_mail or r.account}  id={r.anonymous_id}  at={r.created_at}"
         )
+    return 0
+
+
+def cmd_cdk(args: argparse.Namespace) -> int:
+    """通过 CDK 查询 隐私邮箱 + 母号。"""
+    import json
+
+    db = get_db()
+    if args.list_map:
+        m = db.cdk_map(parent_mail=args.account)
+        print(json.dumps(m, ensure_ascii=False, indent=2))
+        print(f"count={len(m)}")
+        return 0
+
+    if not args.cdk:
+        print("请提供 --cdk CDK_xxx，或使用 --list-map")
+        return 1
+
+    data = db.resolve_cdk(args.cdk)
+    if not data:
+        print(f"未找到 CDK: {args.cdk}")
+        return 1
+    print(json.dumps(data, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -117,6 +159,7 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 account=account.name,
                 label=args.label,
                 note=args.note,
+                cdk_hex_len=args.cdk_hex_len,
             )
     except HMECreateRateLimitError as e:
         print(f"[{account.name}] 拒绝创建（规矩：1小时最多{HME_CREATE_LIMIT_PER_HOUR}个）: {e}")
@@ -126,9 +169,17 @@ def cmd_generate(args: argparse.Namespace) -> int:
         return 1
 
     print(f"[{account.name}] 生成成功: {alias.hme}")
-    print(f"  label={alias.label}")
+    print(f"  label/cdk={alias.label}")
+    print(f"  parent_mail={account.name}")
     if alias.anonymous_id:
         print(f"  id={alias.anonymous_id}")
+    # 展示 CDK 定位结果
+    resolved = db.resolve_cdk(alias.label)
+    if resolved:
+        print(
+            f"  map: {resolved.get('cdk')} -> "
+            f"hme={resolved.get('hme')} parent={resolved.get('parent_mail')}"
+        )
     q = db.get_create_quota(account.name)
     print(f"  quota: {q.used}/{q.limit} in 1h, remaining={q.remaining}")
     print(f"  saved -> {db.db_path}")
@@ -178,20 +229,32 @@ def cmd_toggle(args: argparse.Namespace) -> int:
 
 
 def _mail_client(account) -> ICloudMailClient:
-    if not account.mail_ready:
-        raise SystemExit(f"[{account.name}] 邮件凭证不完整，请检查 accounts 文件 MAIL|APPPWD|COOKIE")
-    return ICloudMailClient(account.mail, account.app_password)
+    try:
+        return mail_client_from_account(account)
+    except ValueError as e:
+        raise SystemExit(
+            f"[{account.name}] 邮件凭证不完整，请检查 apple.app_password / 163mail.imap 与 inbox.mail ({e})"
+        ) from e
 
 
 def cmd_mail_probe(args: argparse.Namespace) -> int:
     _, account = _pick_account(args.account)
     client = _mail_client(account)
-    print(f"[{account.name}] mail={account.mail}")
+    endpoint = account.resolve_inbox()
+    ep = f"{endpoint.name}:{endpoint.mail}" if endpoint else "-"
+    print(
+        f"[{account.name}] account_mail={account.mail} "
+        f"inbox={ep} provider={client.profile.name} "
+        f"imap={client.profile.imap_host}"
+    )
     imap = client.probe_imap()
     smtp = client.probe_smtp()
     print(f"  IMAP: {'OK' if imap.ok else 'FAIL'} - {imap.detail}")
     print(f"  SMTP: {'OK' if smtp.ok else 'FAIL'} - {smtp.detail}")
-    return 0 if imap.ok and smtp.ok else 1
+    # 收件以 IMAP 为准；SMTP 失败多为出站端口限制，单独警告
+    if imap.ok and not smtp.ok:
+        print("  note: IMAP 可用（收件 OK）；SMTP 失败不影响收信")
+    return 0 if imap.ok else 1
 
 
 def cmd_mail_inbox(args: argparse.Namespace) -> int:
@@ -226,6 +289,10 @@ def cmd_mail_inbox(args: argparse.Namespace) -> int:
         print(f"  bcc          : {m.get('bcc')}")
         print(f"  reply_to     : {m.get('reply_to')}")
         print(f"  subject      : {m.get('subject')}")
+        print(f"  type         : {m.get('type')}")
+        print(f"  summary      : {m.get('summary')}")
+        if m.get("code"):
+            print(f"  code         : {m.get('code')}")
         print(f"  message_id   : {m.get('message_id')}")
         print(f"  in_reply_to  : {m.get('in_reply_to')}")
         print(f"  references   : {m.get('references')}")
@@ -287,12 +354,127 @@ def cmd_mail_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def _log_dir(settings) -> Path:
+    raw = (settings.log_dir or "logs").strip()
+    p = Path(raw)
+    if not p.is_absolute():
+        p = settings.base_dir / p
+    return p
+
+
+def cmd_camoufox_fetch(_: argparse.Namespace) -> int:
+    settings = load_settings()
+    logger, log_path = setup_logger(
+        "2608b.camoufox",
+        _log_dir(settings),
+        file_prefix="camoufox-fetch",
+    )
+    print(f"log: {log_path}")
+    print(f"target: {resolve_camoufox_dir(settings)}")
+    try:
+        path = fetch_browser(settings, logger=logger)
+    except Exception as e:
+        logger.exception("fetch failed: %s", e)
+        print(f"失败: {e}")
+        return 1
+    st = browser_status(settings)
+    print(f"OK install_dir={path}")
+    print(f"  installed={st['installed']} exe={st['executable']}")
+    print(f"  under_project={st['under_project']}")
+    return 0
+
+
+def cmd_camoufox_path(_: argparse.Namespace) -> int:
+    settings = load_settings()
+    st = browser_status(settings)
+    print(f"CAMOUFOX_DIR={settings.camoufox_dir}")
+    print(f"install_dir={st['install_dir']}")
+    print(f"installed={st['installed']}")
+    print(f"executable={st['executable'] or '-'}")
+    print(f"under_project={st['under_project']}")
+    return 0 if st["installed"] else 1
+
+
+def cmd_cookie_login(args: argparse.Namespace) -> int:
+    settings, account = _pick_account(args.account)
+    logger, log_path = setup_logger(
+        "2608b.cookie_login",
+        _log_dir(settings),
+        file_prefix="cookie-login",
+        account=account.name,
+    )
+    # 让 runtime logger 也打到同一套 handler
+    import logging
+
+    runtime_logger = logging.getLogger("2608b.camoufox")
+    runtime_logger.handlers.clear()
+    runtime_logger.setLevel(logging.DEBUG)
+    runtime_logger.propagate = False
+    for h in logger.handlers:
+        runtime_logger.addHandler(h)
+
+    print(f"account: {account.name}")
+    print(f"file: {account.source}")
+    print(f"log: {log_path}")
+    print("模式: 有头浏览器 — 请在窗口内登录；2FA 验证码在浏览器里输入")
+    print("等待必填 Cookie 齐全后自动写回 YAML…")
+
+    opts = CookieCaptureOptions(
+        headless=False,
+        timeout_sec=float(args.timeout),
+        url=args.url,
+        backup=not args.no_backup,
+    )
+    try:
+        result = capture_icloud_cookie(
+            settings, account, opts, logger=logger
+        )
+    except CamoufoxRuntimeError as e:
+        print(f"失败: {e}")
+        return 1
+
+    if result.ok:
+        print(f"OK stage={result.stage} keys={len(result.keys)} {result.message}")
+        print(f"  wrote: {result.account_path}")
+        return 0
+
+    print(f"失败 stage={result.stage}: {result.message}")
+    if result.missing:
+        print(f"  missing: {', '.join(result.missing)}")
+    return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="main.py", description="2608B iCloud Hide My Email CLI")
     sub = p.add_subparsers(dest="command", required=True)
 
     p_acc = sub.add_parser("accounts", help="列出本地账户与 cookie 完整性")
     p_acc.set_defaults(func=cmd_accounts)
+
+    p_cf = sub.add_parser("camoufox-fetch", help="下载 Camoufox 到项目 browsers/camoufox")
+    p_cf.set_defaults(func=cmd_camoufox_fetch)
+
+    p_cp = sub.add_parser("camoufox-path", help="显示项目内 Camoufox 路径与安装状态")
+    p_cp.set_defaults(func=cmd_camoufox_path)
+
+    p_cl = sub.add_parser(
+        "cookie-login",
+        help="有头登录 iCloud，采集 Cookie 写回账户 YAML（2FA 在浏览器完成）",
+    )
+    p_cl.add_argument("-a", "--account", help="账户/邮箱")
+    p_cl.add_argument(
+        "--timeout",
+        type=int,
+        default=600,
+        help="等待登录超时秒数，默认 600",
+    )
+    p_cl.add_argument("--url", default=None, help="登录起始 URL，默认 https://www.<domain>/")
+    p_cl.add_argument(
+        "--no-backup",
+        action="store_true",
+        help="写回前不生成 .bak",
+    )
+    p_cl.set_defaults(func=cmd_cookie_login)
 
     p_list = sub.add_parser("list", help="列出 HME 别名并同步到 db")
     p_list.add_argument("-a", "--account", help="账户备注名")
@@ -302,9 +484,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_db.add_argument("-a", "--account", help="按账户过滤")
     p_db.set_defaults(func=cmd_db)
 
+    p_cdk = sub.add_parser("cdk", help="通过 CDK 查询隐私邮箱与母号")
+    p_cdk.add_argument("--cdk", help="CDK_xxx（或仅 hex 体）")
+    p_cdk.add_argument("--list-map", action="store_true", help="导出全部 CDK 映射表")
+    p_cdk.add_argument("-a", "--account", help="--list-map 时按母号过滤")
+    p_cdk.set_defaults(func=cmd_cdk)
+
     p_gen = sub.add_parser("generate", help="生成并保留一个 HME 别名（受1小时5个限制）")
     p_gen.add_argument("-a", "--account", help="账户备注名")
-    p_gen.add_argument("-l", "--label", help="别名标签，默认 Alias_XXXX")
+    p_gen.add_argument(
+        "-l",
+        "--label",
+        help="别名标签；默认 CDK_<sha256_hex>（完整64位hex）",
+    )
+    p_gen.add_argument(
+        "--cdk-hex-len",
+        type=int,
+        default=64,
+        help="默认 cdk 标签的 sha256 hex 长度，8-64，默认 64",
+    )
     p_gen.add_argument("-n", "--note", default="由 2608B_iCloud 生成", help="备注")
     p_gen.set_defaults(func=cmd_generate)
 
