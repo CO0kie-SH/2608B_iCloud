@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_name }} · 邮箱池子</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="logo">✉</span>
+    <div>
+      <div class="brand-name">{{ app_name }}</div>
+      <div class="brand-sub">Hide My Email 邮箱池子</div>
+    </div>
+  </div>
+
+  <div class="topbar-mid">
+    <label class="field">
+      <span class="field-label">母号</span>
+      <select id="accountSelect"></select>
+    </label>
+    <div id="globalStats" class="chips"></div>
+  </div>
+
+  <div class="topbar-actions">
+    <a class="btn btn-ghost nav-button" href="/production">生产</a>
+    <button id="btnSyncAliases" class="btn btn-ghost" title="从 iCloud 拉取隐私邮箱列表">同步隐私</button>
+    <button id="btnSyncMails" class="btn btn-primary" title="从 IMAP 增量收取邮件">收取邮件</button>
+  </div>
+</header>
+
+<div id="syncBar" class="syncbar hidden">
+  <div class="syncbar-track"><div class="syncbar-fill"></div></div>
+  <span id="syncMsg" class="syncbar-msg">正在收取…</span>
+  <button id="syncClose" class="btn-icon" title="关闭">×</button>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<main class="layout">
+
+  <!-- 左：母号 + 分组占位 -->
+  <aside class="col col-accounts">
+    <div class="col-head"><h2>母号账户</h2></div>
+    <div id="accountCards" class="scroll-area"></div>
+
+    <div class="col-head col-head-sep">
+      <h2>分组</h2>
+      <span class="badge badge-soon">即将推出</span>
+    </div>
+    <div class="group-placeholder">
+      <p>把隐私邮箱按用途归组，便于批量筛选与管理。</p>
+      <button class="btn btn-ghost" disabled title="后续版本开放">＋ 新建分组</button>
+    </div>
+  </aside>
+
+  <!-- 中：邮箱池子 -->
+  <section class="col col-pool">
+    <div class="col-head">
+      <h2>邮箱池子</h2>
+      <input id="poolSearch" class="search" type="search" placeholder="搜索隐私邮箱 / 标签 / CDK">
+    </div>
+    <div id="poolContent" class="scroll-area"></div>
+  </section>
+
+  <!-- 右：邮件按分类分块 -->
+  <section class="col col-mails">
+    <div class="col-head">
+      <h2>邮件</h2>
+      <div class="filter-info">
+        <span id="mailFilterInfo" class="pill hidden"></span>
+        <input id="mailSearch" class="search" type="search" placeholder="搜索主题 / 发件人 / 验证码">
+      </div>
+    </div>
+    <div id="mailContent" class="scroll-area"></div>
+  </section>
+
+</main>
+
+<!-- 邮件详情抽屉 -->
+<div id="drawerMask" class="drawer-mask hidden"></div>
+<aside id="drawer" class="drawer hidden">
+  <div class="drawer-head">
+    <div id="drawerTitle" class="drawer-title">邮件详情</div>
+    <button id="drawerClose" class="btn-icon" title="关闭">×</button>
+  </div>
+  <div id="drawerBody" class="drawer-body"></div>
+</aside>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

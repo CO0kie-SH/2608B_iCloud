@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -124,75 +125,98 @@ class HMEService:
                 f"以强制执行每小时最多 {HME_CREATE_LIMIT_PER_HOUR} 个的规矩"
             )
 
-        # 创建前硬检查
-        quota = store.assert_can_create(account)
+        # 创建前原子占位；并发 Web 客户端共享同一 SQLite 配额。
+        claim_id = store.claim_create_slot(account)
+        quota = store.get_create_quota(account)
         print(
             f"[rate-limit] {account}: {quota.used}/{quota.limit} used in 1h, "
             f"remaining={quota.remaining}"
         )
 
-        gen = self.generate_raw(lang=lang)
-        if not gen.get("success") or not ((gen.get("result") or {}).get("hme")):
-            raise RuntimeError(f"分配失败: {gen}")
+        event_recorded = False
+        try:
+            gen: dict[str, Any] = {}
+            for attempt in range(3):
+                gen = self.generate_raw(lang=lang)
+                if gen.get("success") and ((gen.get("result") or {}).get("hme")):
+                    break
+                error = gen.get("error") or {}
+                transient = str(error.get("errorCode") or "") == "-41017"
+                if not transient or attempt >= 2:
+                    break
+                retry_after = max(1, min(int(error.get("retryAfter") or 2), 10))
+                time.sleep(retry_after)
+            if not gen.get("success") or not ((gen.get("result") or {}).get("hme")):
+                raise RuntimeError(f"分配失败: {gen}")
 
-        hme = gen["result"]["hme"]
-        if not label:
-            label = generate_cdk_label(hex_len=cdk_hex_len)
-        elif len(label) > CDK_LABEL_MAX:
-            raise ValueError(f"label 长度 {len(label)} 超过上限 {CDK_LABEL_MAX}")
+            hme = gen["result"]["hme"]
+            if not label:
+                label = generate_cdk_label(hex_len=cdk_hex_len)
+            elif len(label) > CDK_LABEL_MAX:
+                raise ValueError(f"label 长度 {len(label)} 超过上限 {CDK_LABEL_MAX}")
 
-        res = self.reserve(hme=hme, label=label, note=note)
-        if not res.get("success"):
-            raise RuntimeError(f"保留邮箱失败: {res}")
+            res = self.reserve(hme=hme, label=label, note=note)
+            if not res.get("success"):
+                raise RuntimeError(f"保留邮箱失败: {res}")
+        except Exception:
+            store.release_create_claim(claim_id)
+            raise
 
-        result = res.get("result") or {}
-        item: dict[str, Any] = {}
-        if isinstance(result, dict):
-            nested = result.get("hme")
-            if isinstance(nested, dict):
-                item = nested
-            elif result.get("anonymousId") or isinstance(result.get("hme"), str):
-                item = result
+        try:
+            result = res.get("result") or {}
+            item: dict[str, Any] = {}
+            if isinstance(result, dict):
+                nested = result.get("hme")
+                if isinstance(nested, dict):
+                    item = nested
+                elif result.get("anonymousId") or isinstance(result.get("hme"), str):
+                    item = result
 
-        if item:
-            alias = HMEAlias.from_api(item)
-            if not alias.hme:
-                alias.hme = hme
-            if not alias.label:
-                alias.label = label
-            if alias.raw is None:
-                alias.raw = item
-        else:
-            alias = HMEAlias(
-                hme=hme,
-                label=label,
-                is_active=True,
-                anonymous_id=str(result.get("anonymousId") or "") if isinstance(result, dict) else "",
-                raw=res if isinstance(res, dict) else None,
+            if item:
+                alias = HMEAlias.from_api(item)
+                if not alias.hme:
+                    alias.hme = hme
+                if not alias.label:
+                    alias.label = label
+                if alias.raw is None:
+                    alias.raw = item
+            else:
+                alias = HMEAlias(
+                    hme=hme,
+                    label=label,
+                    is_active=True,
+                    anonymous_id=str(result.get("anonymousId") or "") if isinstance(result, dict) else "",
+                    raw=res if isinstance(res, dict) else None,
+                )
+
+            # 成功后记账（限流）+ 写入 aliases（CDK -> 隐私邮箱 + 母号）
+            cdk = alias.label if str(alias.label).startswith("CDK_") else label
+            created_at = store.record_create_event(
+                account,
+                hme=alias.hme,
+                label=alias.label,
+                cdk=cdk,
+                parent_mail=account,
             )
-
-        # 成功后记账（限流）+ 写入 aliases（CDK -> 隐私邮箱 + 母号）
-        cdk = alias.label if str(alias.label).startswith("CDK_") else label
-        created_at = store.record_create_event(
-            account,
-            hme=alias.hme,
-            label=alias.label,
-            cdk=cdk,
-            parent_mail=account,
-        )
-        store.upsert_alias(
-            account=account,
-            parent_mail=account,
-            hme=alias.hme,
-            label=alias.label,
-            cdk=cdk,
-            anonymous_id=alias.anonymous_id,
-            is_active=alias.is_active,
-            create_timestamp=alias.create_timestamp,
-            note=note,
-            source="generate",
-            raw=alias.raw,
-        )
+            event_recorded = True
+            store.upsert_alias(
+                account=account,
+                parent_mail=account,
+                hme=alias.hme,
+                label=alias.label,
+                cdk=cdk,
+                anonymous_id=alias.anonymous_id,
+                is_active=alias.is_active,
+                create_timestamp=alias.create_timestamp,
+                note=note,
+                source="generate",
+                raw=alias.raw,
+            )
+        finally:
+            # reserve 已成功但本地记账失败时保留 claim 一小时，避免上游已创建
+            # 而本地配额回退，导致后续请求越过真实限制。
+            if event_recorded:
+                store.release_create_claim(claim_id)
         print(f"[rate-limit] recorded create_event at {created_at} for {alias.hme}")
         print(f"[cdk-map] {cdk} -> hme={alias.hme} parent={account}")
         return alias

@@ -354,6 +354,72 @@ def cmd_mail_get(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mail_sync(args: argparse.Namespace) -> int:
+    """增量收取邮件并入库（只存元数据+分类，正文不落库）。"""
+    from tools.mail_sync import MailSyncService
+
+    settings = load_settings()
+    db = get_db()
+    service = MailSyncService(db)
+
+    if args.all_accounts:
+        _, accounts = load_all_accounts(settings.accounts_files, settings.base_dir)
+        if not accounts:
+            raise SystemExit("未加载到任何账户，请检查 accounts/ 与 .env")
+        targets = accounts
+    else:
+        _, account = _pick_account(args.account)
+        targets = [account]
+
+    boxes = [b.strip() for b in (args.box or "").split(",") if b.strip()] or None
+    stats = service.sync_accounts(
+        targets,
+        mailboxes=boxes,
+        limit=args.limit,
+        full=args.full,
+        on_progress=(lambda msg: _safe_print(f"  .. {msg}")) if args.verbose else None,
+    )
+
+    total_saved = sum(s.saved for s in stats)
+    total_updated = sum(s.updated for s in stats)
+    failed = [s for s in stats if not s.ok]
+    for s in stats:
+        from tools.mail import mailbox_label as _mailbox_label
+
+        head = f"[{s.account}] {_mailbox_label(s.mailbox)}"
+        if not s.ok:
+            _safe_print(f"{head} FAIL: {s.error}")
+            continue
+        by_type = ", ".join(f"{k}={v}" for k, v in sorted(s.by_type.items())) or "-"
+        _safe_print(
+            f"{head} fetched={s.fetched} new={s.saved} updated={s.updated} "
+            f"alias_matched={s.matched_alias} last_uid={s.last_uid} [{by_type}]"
+        )
+
+    _safe_print(f"总计: 新增 {total_saved}，更新 {total_updated}，失败 {len(failed)}")
+    if settings.debug:
+        for s in stats:
+            _safe_print(f"  debug: {s.to_dict()}")
+    return 1 if failed and total_saved == 0 and total_updated == 0 else 0
+
+
+def cmd_web(args: argparse.Namespace) -> int:
+    """启动 Web 界面（邮箱池子 + 收件展示）。"""
+    try:
+        import uvicorn
+    except ImportError:
+        raise SystemExit(
+            "缺少 uvicorn，请先安装：pip install -r requirements.txt"
+        ) from None
+
+    # 复用模块级单例，避免重复装配（重复解析账户、重复挂载静态目录）
+    from web.app import app
+
+    _safe_print(f"Web 已启动: http://{args.host}:{args.port}")
+    uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
+    return 0
+
+
 def _log_dir(settings) -> Path:
     raw = (settings.log_dir or "logs").strip()
     p = Path(raw)
@@ -548,6 +614,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_get.add_argument("--no-body", action="store_true", help="不拉正文")
     p_get.add_argument("--body-limit", type=int, default=0, help="正文截断，0=不截断")
     p_get.set_defaults(func=cmd_mail_get)
+
+    p_sync = sub.add_parser(
+        "mail-sync", help="增量收取邮件并入库（元数据+分类，正文不落库）"
+    )
+    p_sync.add_argument("-a", "--account", help="账户/邮箱")
+    p_sync.add_argument("--all-accounts", action="store_true", help="收取全部账户")
+    p_sync.add_argument(
+        "--box", default="", help="逗号分隔文件夹；默认按 provider 取 INBOX,Junk"
+    )
+    p_sync.add_argument("-n", "--limit", type=int, default=200, help="每目录上限，默认 200")
+    p_sync.add_argument("--full", action="store_true", help="忽略水位，全量重扫")
+    p_sync.add_argument("-v", "--verbose", action="store_true", help="打印进度")
+    p_sync.set_defaults(func=cmd_mail_sync)
+
+    p_web = sub.add_parser("web", help="启动 Web 界面（邮箱池子 + 收件展示）")
+    p_web.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
+    p_web.add_argument("--port", type=int, default=8770, help="端口，默认 8770")
+    p_web.add_argument("--log-level", default="info", help="uvicorn 日志级别")
+    p_web.set_defaults(func=cmd_web)
 
     return p
 

@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
 import yaml
 
+from .config import env_tuple
 from .cookies import OPTIONAL_COOKIE_KEYS, REQUIRED_COOKIE_KEYS, missing_required_keys, parse_cookie_keys
 
 _YAML_SUFFIXES = {".yml", ".yaml"}
@@ -16,6 +18,59 @@ PROVIDER_LABELS: dict[str, str] = {
     "apple": "Apple/iCloud",
     "163mail": "163",
 }
+
+# provider 块名 → 该服务商负责的邮箱域名。
+# apple 块的登录名取自 appleid，而 appleid 完全可以是第三方地址（例如 163）。
+# 这种账户里 apple 与 163mail 两块的 mail 相同，必须按域名判断该用谁的服务器，
+# 否则会拿 163 地址去 Apple 的 IMAP 认证，一定报 AUTHENTICATIONFAILED。
+_PROVIDER_DOMAIN_DEFAULTS: dict[str, tuple[str, ...]] = {
+    "apple": ("icloud.com", "me.com", "mac.com"),
+    "163mail": ("163.com", "126.com", "yeah.net", "vip.163.com"),
+}
+
+_PROVIDER_DOMAIN_ENV_KEYS: dict[str, str] = {
+    "apple": "MAIL_APPLE_DOMAINS",
+    "163mail": "MAIL_163_DOMAINS",
+}
+
+
+@lru_cache(maxsize=1)
+def provider_domains() -> dict[str, tuple[str, ...]]:
+    """provider → 域名列表（可在 .env 覆盖，逗号分隔）。"""
+    return {
+        name: env_tuple(_PROVIDER_DOMAIN_ENV_KEYS[name], defaults)
+        for name, defaults in _PROVIDER_DOMAIN_DEFAULTS.items()
+    }
+
+
+def provider_for_domain(mail: str) -> str:
+    """邮箱地址 → 应当使用的 provider 块名；未知域名返回空串。"""
+    domain = (mail or "").strip().lower().rpartition("@")[2]
+    if not domain:
+        return ""
+    for name, domains in provider_domains().items():
+        if domain in domains:
+            return name
+    return ""
+
+
+def _retarget_by_domain(endpoint: MailProvider) -> MailProvider:
+    """
+    按地址域名纠正端点的 provider 名。
+
+    下游用 provider 名挑 IMAP/SMTP 服务器，而块名不一定对应地址所属服务商
+    （apple 块的登录名可能是 163 地址）。名字对不上就会连错服务器。
+    域名未知时保持原样，交由默认配置兜底。
+    """
+    expected = provider_for_domain(endpoint.mail)
+    if not expected or expected == endpoint.name:
+        return endpoint
+    return MailProvider(
+        name=expected,
+        mail=endpoint.mail,
+        password=endpoint.password,
+        extra=endpoint.extra,
+    )
 
 
 @dataclass
@@ -74,30 +129,41 @@ class Account:
                 for p in self.providers.values()
                 if (p.mail or "").strip().lower() == target
             ]
-            # apple.appleid 常与 163mail.mail 相同，优先有密码的块
-            for p in matches:
+            # apple.appleid 常与 163mail.mail 相同，两块都 ready 时按字典顺序会误选
+            # apple；先按地址域名匹配服务商，再看密码是否齐全。
+            expected = provider_for_domain(target)
+            ranked = sorted(matches, key=lambda p: (p.name != expected, not p.ready))
+            for p in ranked:
                 if p.ready:
                     return p
-            if matches:
-                return matches[0]
+            if ranked:
+                return ranked[0]
             # inbox 写了地址但未匹配到块：用该地址 + apple 密码兜底（扁平/旧习惯）
             if self.app_password:
-                return MailProvider(name="inbox", mail=self.inbox_mail, password=self.app_password)
+                return MailProvider(
+                    name=expected or "apple",
+                    mail=self.inbox_mail,
+                    password=self.app_password,
+                )
 
         apple = self.providers.get("apple")
         if apple and apple.ready:
-            return apple
+            return _retarget_by_domain(apple)
         if apple and self.app_password:
             # apple 块只有 cookie、密码在扁平字段
             mail = apple.mail or self.apple_id or self.mail
-            return MailProvider(name="apple", mail=mail, password=self.app_password)
+            return _retarget_by_domain(
+                MailProvider(name="apple", mail=mail, password=self.app_password)
+            )
 
         for p in self.providers.values():
             if p.ready:
-                return p
+                return _retarget_by_domain(p)
 
         if self.mail and self.app_password:
-            return MailProvider(name="apple", mail=self.mail, password=self.app_password)
+            return _retarget_by_domain(
+                MailProvider(name="apple", mail=self.mail, password=self.app_password)
+            )
         return None
 
     def summary(self) -> str:

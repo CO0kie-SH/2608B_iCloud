@@ -2,11 +2,60 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+@lru_cache(maxsize=1)
+def ensure_env_loaded() -> None:
+    """
+    保证 .env 已加载后再读环境变量。
+
+    模块级常量可能在 load_settings() 之前就被求值，所以凡是延迟读取 env 的地方
+    都先调一次这里。load_dotenv 默认不覆盖已存在的环境变量，重复调用是安全的。
+    """
+    load_dotenv(BASE_DIR / ".env")
+
+
+def env_str(key: str, default: str) -> str:
+    ensure_env_loaded()
+    raw = os.getenv(key)
+    return raw.strip() if raw and raw.strip() else default
+
+
+def env_int(key: str, default: int) -> int:
+    ensure_env_loaded()
+    raw = (os.getenv(key) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def env_bool(key: str, default: bool) -> bool:
+    ensure_env_loaded()
+    raw = (os.getenv(key) or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def env_tuple(key: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    """逗号分隔列表；统一小写去空。"""
+    ensure_env_loaded()
+    raw = (os.getenv(key) or "").strip()
+    if not raw:
+        return default
+    items = tuple(p.strip().lower() for p in raw.split(",") if p.strip())
+    return items or default
 
 
 @dataclass(frozen=True)

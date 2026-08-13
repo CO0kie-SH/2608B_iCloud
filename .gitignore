@@ -25,4 +25,5 @@ Thumbs.db
 
 # local dumps
 mail_dump.txt
-_*.py
+/_*.py
+/scripts/_*.py

@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import uuid
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .rate_limit import (
     HME_CREATE_LIMIT_PER_HOUR,
@@ -106,6 +108,66 @@ class AliasRecord:
 
 
 @dataclass
+class MailRecord:
+    """一封邮件的元数据 + 分类结果（不含正文）。"""
+
+    id: int
+    account: str
+    parent_mail: str
+    mailbox: str
+    uid: str
+    message_id: str
+    alias_hme: str
+    from_name: str
+    from_addr: str
+    sender_addr: str
+    return_path: str
+    is_relayed: int
+    relay_label: str
+    to_addr: str
+    delivered_to: str
+    subject: str
+    mail_type: str
+    code: str
+    summary: str
+    date_header: str
+    date_utc: str
+    internaldate: str
+    size: int | None
+    flags_json: str
+    is_seen: int
+    has_attachment: int
+    attachments_json: str
+    body_text_len: int
+    body_html_len: int
+    content_type: str
+    fetched_at: str
+    created_at: str
+    updated_at: str
+
+    def to_dict(self) -> dict[str, Any]:
+        d = asdict(self)
+        d["is_relayed"] = bool(self.is_relayed)
+        d["is_seen"] = bool(self.is_seen)
+        d["has_attachment"] = bool(self.has_attachment)
+        d["flags"] = _loads_list(self.flags_json)
+        d["attachments"] = _loads_list(self.attachments_json)
+        d.pop("flags_json", None)
+        d.pop("attachments_json", None)
+        return d
+
+
+def _loads_list(raw: str) -> list[Any]:
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+@dataclass
 class CreateQuota:
     account: str
     used: int
@@ -133,10 +195,24 @@ class AliasDB:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=30)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        # check_same_thread=False：每次调用都新建独立连接，不跨线程复用，
+        # 但 web 端同步路由跑在线程池里，需要放开该检查。
+        conn = sqlite3.connect(self.db_path, timeout=30, check_same_thread=False)
         conn.row_factory = sqlite3.Row
-        return conn
+        # WAL 让「收信写入」与「页面读取」不互相阻塞（持久属性，重复设置无害）
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except sqlite3.DatabaseError:
+            pass
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
 
     def _table_columns(self, conn: sqlite3.Connection, table: str) -> set[str]:
         rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
@@ -267,6 +343,48 @@ class AliasDB:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS create_claims (
+                    claim_id TEXT PRIMARY KEY,
+                    account TEXT NOT NULL,
+                    claimed_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_create_claims_account_time ON create_claims(account, claimed_at)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS production_jobs (
+                    job_id TEXT PRIMARY KEY,
+                    account TEXT NOT NULL,
+                    interface TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    requested INTEGER NOT NULL DEFAULT 0,
+                    created INTEGER NOT NULL DEFAULT 0,
+                    progress_json TEXT NOT NULL DEFAULT '[]',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    finished_at TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_production_jobs_updated ON production_jobs(updated_at)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS client_sync_state (
+                    client_id TEXT PRIMARY KEY,
+                    last_seen_at TEXT NOT NULL,
+                    user_agent TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
             ev_cols = self._table_columns(conn, "create_events")
             if "cdk" not in ev_cols:
                 conn.execute(
@@ -283,6 +401,119 @@ class AliasDB:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_create_events_cdk "
                 "ON create_events(cdk)"
+            )
+
+            # ---------- 邮件（只存元数据 + 分类结果，正文按需实时拉取）----------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mails (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    account TEXT NOT NULL,
+                    parent_mail TEXT NOT NULL DEFAULT '',
+                    mailbox TEXT NOT NULL DEFAULT 'INBOX',
+                    uid TEXT NOT NULL,
+                    message_id TEXT NOT NULL DEFAULT '',
+                    alias_hme TEXT NOT NULL DEFAULT '',
+                    from_name TEXT NOT NULL DEFAULT '',
+                    from_addr TEXT NOT NULL DEFAULT '',
+                    sender_addr TEXT NOT NULL DEFAULT '',
+                    return_path TEXT NOT NULL DEFAULT '',
+                    is_relayed INTEGER NOT NULL DEFAULT 0,
+                    relay_label TEXT NOT NULL DEFAULT '',
+                    to_addr TEXT NOT NULL DEFAULT '',
+                    delivered_to TEXT NOT NULL DEFAULT '',
+                    subject TEXT NOT NULL DEFAULT '',
+                    mail_type TEXT NOT NULL DEFAULT 'other',
+                    code TEXT NOT NULL DEFAULT '',
+                    summary TEXT NOT NULL DEFAULT '',
+                    date_header TEXT NOT NULL DEFAULT '',
+                    date_utc TEXT NOT NULL DEFAULT '',
+                    internaldate TEXT NOT NULL DEFAULT '',
+                    size INTEGER,
+                    flags_json TEXT NOT NULL DEFAULT '',
+                    is_seen INTEGER NOT NULL DEFAULT 0,
+                    has_attachment INTEGER NOT NULL DEFAULT 0,
+                    attachments_json TEXT NOT NULL DEFAULT '',
+                    body_text_len INTEGER NOT NULL DEFAULT 0,
+                    body_html_len INTEGER NOT NULL DEFAULT 0,
+                    content_type TEXT NOT NULL DEFAULT '',
+                    fetched_at TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_mails_uid_unique "
+                "ON mails(account, mailbox, uid)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mails_account_date "
+                "ON mails(account, date_utc DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mails_type ON mails(mail_type)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mails_alias ON mails(alias_hme)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mails_from ON mails(from_addr)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mails_message_id ON mails(message_id)"
+            )
+
+            # ---------- 增量收取水位 ----------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mail_sync_state (
+                    account TEXT NOT NULL,
+                    mailbox TEXT NOT NULL,
+                    last_uid INTEGER NOT NULL DEFAULT 0,
+                    last_sync_at TEXT NOT NULL DEFAULT '',
+                    last_status TEXT NOT NULL DEFAULT '',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    total_saved INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (account, mailbox)
+                )
+                """
+            )
+
+            # ---------- 分组（本期只建表 + 最小 CRUD，UI 后续再做）----------
+            # 用独立关联表而非给 aliases 加列：upsert_alias 在同步时会覆写别名行，
+            # 分组信息挂在同表上有被同步逻辑冲掉的风险；关联表也支持一别名多组。
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alias_groups (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    account TEXT NOT NULL DEFAULT '',
+                    color TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_alias_groups_name "
+                "ON alias_groups(account, name)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS alias_group_members (
+                    group_id INTEGER NOT NULL,
+                    hme TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY (group_id, hme)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alias_group_members_hme "
+                "ON alias_group_members(hme)"
             )
             conn.commit()
 
@@ -385,6 +616,55 @@ class AliasDB:
             conn.commit()
         return now
 
+    def claim_create_slot(
+        self,
+        account: str,
+        *,
+        limit: int = HME_CREATE_LIMIT_PER_HOUR,
+        window_seconds: int = HME_CREATE_WINDOW_SECONDS,
+    ) -> str:
+        """原子占用一个创建名额，防止并发客户端越过每小时限制。"""
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        now = utc_now_dt()
+        since_s = (now - timedelta(seconds=window_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+        claim_id = uuid.uuid4().hex
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM create_claims WHERE claimed_at < ?", (since_s,))
+            events = conn.execute(
+                "SELECT created_at FROM create_events WHERE account = ? AND created_at >= ? ORDER BY created_at ASC",
+                (account, since_s),
+            ).fetchall()
+            active = conn.execute(
+                "SELECT COUNT(*) AS n FROM create_claims WHERE account = ? AND claimed_at >= ?",
+                (account, since_s),
+            ).fetchone()
+            used = len(events) + int(active["n"] if active else 0)
+            if used >= int(limit):
+                retry_after = 0
+                if events:
+                    oldest = parse_utc(events[0]["created_at"])
+                    if oldest:
+                        retry_after = max(
+                            0, int((oldest + timedelta(seconds=window_seconds) - now).total_seconds())
+                        )
+                raise HMECreateRateLimitError(account, used, limit, retry_after)
+            conn.execute(
+                "INSERT INTO create_claims (claim_id, account, claimed_at) VALUES (?, ?, ?)",
+                (claim_id, account, utc_now()),
+            )
+            conn.commit()
+        return claim_id
+
+    def release_create_claim(self, claim_id: str) -> None:
+        if not claim_id:
+            return
+        with self._connect() as conn:
+            conn.execute("DELETE FROM create_claims WHERE claim_id = ?", (claim_id,))
+            conn.commit()
+
     def get_create_quota(
         self,
         account: str,
@@ -404,6 +684,10 @@ class AliasDB:
                 """,
                 (account, since_s),
             ).fetchall()
+            active_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM create_claims WHERE account = ? AND claimed_at >= ?",
+                (account, since_s),
+            ).fetchone()
 
         recent = [
             {
@@ -414,7 +698,8 @@ class AliasDB:
             }
             for r in rows
         ]
-        used = len(recent)
+        active_claims = int(active_row["n"] if active_row else 0)
+        used = len(recent) + active_claims
         remaining = max(0, limit - used)
         retry_after = 0
         if used >= limit and recent:
@@ -432,6 +717,80 @@ class AliasDB:
             retry_after_sec=retry_after,
             recent=recent,
         )
+
+    # ---------- 生产任务 / 多客户端同步 ----------
+
+    def create_production_job(
+        self, job_id: str, account: str, interface: str, requested: int
+    ) -> None:
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO production_jobs (
+                    job_id, account, interface, status, requested, updated_at
+                ) VALUES (?, ?, ?, 'pending', ?, ?)
+                """,
+                (job_id, account, interface, max(0, int(requested)), now),
+            )
+            conn.commit()
+
+    def update_production_job(self, job_id: str, **changes: Any) -> None:
+        allowed = {
+            "status", "created", "progress_json", "result_json", "error",
+            "started_at", "finished_at",
+        }
+        fields = [(key, value) for key, value in changes.items() if key in allowed]
+        if not fields:
+            return
+        fields.append(("updated_at", utc_now()))
+        sql = "UPDATE production_jobs SET " + ", ".join(f"{key} = ?" for key, _ in fields)
+        with self._connect() as conn:
+            conn.execute(sql + " WHERE job_id = ?", [value for _, value in fields] + [job_id])
+            conn.commit()
+
+    @staticmethod
+    def _production_job_dict(row: sqlite3.Row) -> dict[str, Any]:
+        result = dict(row)
+        try:
+            result["progress"] = json.loads(result.pop("progress_json") or "[]")
+        except (TypeError, ValueError):
+            result["progress"] = []
+        try:
+            result["result"] = json.loads(result.pop("result_json") or "{}")
+        except (TypeError, ValueError):
+            result["result"] = {}
+        return result
+
+    def get_production_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM production_jobs WHERE job_id = ?", (job_id,)
+            ).fetchone()
+        return self._production_job_dict(row) if row else None
+
+    def list_production_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM production_jobs ORDER BY updated_at DESC LIMIT ?",
+                (max(1, min(int(limit), 500)),),
+            ).fetchall()
+        return [self._production_job_dict(row) for row in rows]
+
+    def touch_client(self, client_id: str, user_agent: str = "") -> str:
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO client_sync_state (client_id, last_seen_at, user_agent)
+                VALUES (?, ?, ?)
+                ON CONFLICT(client_id) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at, user_agent=excluded.user_agent
+                """,
+                ((client_id or "anonymous")[:128], now, (user_agent or "")[:300]),
+            )
+            conn.commit()
+        return now
 
     def assert_can_create(self, account: str) -> CreateQuota:
         """超限则抛 HMECreateRateLimitError。"""
@@ -560,6 +919,492 @@ class AliasDB:
             note=row["note"],
             source=row["source"],
             raw_json=row["raw_json"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    # ---------- 邮件 ----------
+
+    def upsert_mail(
+        self,
+        *,
+        account: str,
+        uid: str,
+        mailbox: str = "INBOX",
+        parent_mail: str = "",
+        message_id: str = "",
+        alias_hme: str = "",
+        from_name: str = "",
+        from_addr: str = "",
+        sender_addr: str = "",
+        return_path: str = "",
+        is_relayed: bool = False,
+        relay_label: str = "",
+        to_addr: str = "",
+        delivered_to: str = "",
+        subject: str = "",
+        mail_type: str = "other",
+        code: str = "",
+        summary: str = "",
+        date_header: str = "",
+        date_utc: str = "",
+        internaldate: str = "",
+        size: int | None = None,
+        flags: list[str] | None = None,
+        is_seen: bool = False,
+        attachments: list[dict[str, Any]] | None = None,
+        body_text_len: int = 0,
+        body_html_len: int = 0,
+        content_type: str = "",
+    ) -> tuple[int, bool]:
+        """
+        写入/更新一封邮件（只存元数据与分类结果）。
+        返回 (mail_id, is_new)。唯一键为 (account, mailbox, uid)。
+        """
+        now = utc_now()
+        atts = attachments or []
+        flags_json = json.dumps(flags or [], ensure_ascii=False)
+        atts_json = json.dumps(atts, ensure_ascii=False, default=str)
+
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM mails WHERE account = ? AND mailbox = ? AND uid = ?",
+                (account, mailbox, str(uid)),
+            ).fetchone()
+            is_new = row is None
+            conn.execute(
+                """
+                INSERT INTO mails (
+                    account, parent_mail, mailbox, uid, message_id, alias_hme,
+                    from_name, from_addr, sender_addr, return_path, is_relayed, relay_label,
+                    to_addr, delivered_to, subject, mail_type, code, summary,
+                    date_header, date_utc, internaldate, size, flags_json, is_seen,
+                    has_attachment, attachments_json, body_text_len, body_html_len,
+                    content_type, fetched_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account, mailbox, uid) DO UPDATE SET
+                    parent_mail=CASE WHEN excluded.parent_mail != '' THEN excluded.parent_mail ELSE mails.parent_mail END,
+                    message_id=CASE WHEN excluded.message_id != '' THEN excluded.message_id ELSE mails.message_id END,
+                    alias_hme=CASE WHEN excluded.alias_hme != '' THEN excluded.alias_hme ELSE mails.alias_hme END,
+                    from_name=excluded.from_name,
+                    from_addr=excluded.from_addr,
+                    sender_addr=excluded.sender_addr,
+                    return_path=excluded.return_path,
+                    is_relayed=excluded.is_relayed,
+                    relay_label=excluded.relay_label,
+                    to_addr=excluded.to_addr,
+                    delivered_to=excluded.delivered_to,
+                    subject=excluded.subject,
+                    mail_type=excluded.mail_type,
+                    code=CASE WHEN excluded.code != '' THEN excluded.code ELSE mails.code END,
+                    summary=excluded.summary,
+                    date_header=excluded.date_header,
+                    date_utc=CASE WHEN excluded.date_utc != '' THEN excluded.date_utc ELSE mails.date_utc END,
+                    internaldate=CASE WHEN excluded.internaldate != '' THEN excluded.internaldate ELSE mails.internaldate END,
+                    size=COALESCE(excluded.size, mails.size),
+                    flags_json=excluded.flags_json,
+                    is_seen=excluded.is_seen,
+                    has_attachment=excluded.has_attachment,
+                    attachments_json=excluded.attachments_json,
+                    body_text_len=excluded.body_text_len,
+                    body_html_len=excluded.body_html_len,
+                    content_type=excluded.content_type,
+                    fetched_at=excluded.fetched_at,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    account,
+                    (parent_mail or account or "").strip(),
+                    mailbox,
+                    str(uid),
+                    message_id,
+                    alias_hme,
+                    from_name,
+                    from_addr,
+                    sender_addr,
+                    return_path,
+                    1 if is_relayed else 0,
+                    relay_label,
+                    to_addr,
+                    delivered_to,
+                    subject,
+                    mail_type or "other",
+                    code,
+                    summary,
+                    date_header,
+                    date_utc,
+                    internaldate,
+                    size,
+                    flags_json,
+                    1 if is_seen else 0,
+                    1 if atts else 0,
+                    atts_json,
+                    body_text_len,
+                    body_html_len,
+                    content_type,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+            mail_row = conn.execute(
+                "SELECT id FROM mails WHERE account = ? AND mailbox = ? AND uid = ?",
+                (account, mailbox, str(uid)),
+            ).fetchone()
+            conn.commit()
+        return (int(mail_row["id"]) if mail_row else 0), is_new
+
+    @staticmethod
+    def _mail_filters(
+        account: str | None,
+        alias_hme: str | None,
+        mail_type: str | None,
+        mailbox: str | None,
+        q: str | None,
+    ) -> tuple[str, list[Any]]:
+        where: list[str] = []
+        params: list[Any] = []
+        if account:
+            where.append("(account = ? OR parent_mail = ?)")
+            params.extend([account, account])
+        if alias_hme:
+            where.append("alias_hme = ?")
+            params.append(alias_hme.strip().lower())
+        if mail_type:
+            where.append("mail_type = ?")
+            params.append(mail_type)
+        if mailbox:
+            where.append("mailbox = ?")
+            params.append(mailbox)
+        if q:
+            like = f"%{q.strip()}%"
+            where.append(
+                "(subject LIKE ? OR from_addr LIKE ? OR from_name LIKE ? "
+                "OR alias_hme LIKE ? OR summary LIKE ? OR code LIKE ?)"
+            )
+            params.extend([like] * 6)
+        clause = (" WHERE " + " AND ".join(where)) if where else ""
+        return clause, params
+
+    def list_mails(
+        self,
+        *,
+        account: str | None = None,
+        alias_hme: str | None = None,
+        mail_type: str | None = None,
+        mailbox: str | None = None,
+        q: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[MailRecord]:
+        clause, params = self._mail_filters(account, alias_hme, mail_type, mailbox, q)
+        lim = max(1, min(int(limit or 50), 500))
+        off = max(0, int(offset or 0))
+        # date_utc 可能为空（Date 头缺失/不可解析），回落到 fetched_at 保证排序稳定
+        sql = (
+            "SELECT * FROM mails" + clause
+            + " ORDER BY CASE WHEN date_utc != '' THEN date_utc ELSE fetched_at END DESC,"
+              " id DESC LIMIT ? OFFSET ?"
+        )
+        with self._connect() as conn:
+            rows = conn.execute(sql, (*params, lim, off)).fetchall()
+        return [self._row_to_mail(r) for r in rows]
+
+    def count_mails(
+        self,
+        *,
+        account: str | None = None,
+        alias_hme: str | None = None,
+        mail_type: str | None = None,
+        mailbox: str | None = None,
+        q: str | None = None,
+    ) -> int:
+        clause, params = self._mail_filters(account, alias_hme, mail_type, mailbox, q)
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM mails" + clause, params
+            ).fetchone()
+        return int(row["n"]) if row else 0
+
+    def count_mails_by_type(
+        self,
+        account: str | None = None,
+        alias_hme: str | None = None,
+        *,
+        mailbox: str | None = None,
+        q: str | None = None,
+    ) -> dict[str, int]:
+        clause, params = self._mail_filters(account, alias_hme, None, mailbox, q)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT mail_type, COUNT(*) AS n FROM mails" + clause
+                + " GROUP BY mail_type",
+                params,
+            ).fetchall()
+        return {str(r["mail_type"] or "other"): int(r["n"]) for r in rows}
+
+    def count_mails_by_mailbox(
+        self,
+        account: str | None = None,
+        alias_hme: str | None = None,
+        *,
+        q: str | None = None,
+    ) -> dict[str, int]:
+        clause, params = self._mail_filters(account, alias_hme, None, None, q)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT mailbox, COUNT(*) AS n FROM mails" + clause
+                + " GROUP BY mailbox",
+                params,
+            ).fetchall()
+        return {str(r["mailbox"] or "INBOX"): int(r["n"]) for r in rows}
+
+    def count_mails_by_alias(self, account: str | None = None) -> dict[str, dict[str, Any]]:
+        """每个收件别名的邮件数与最近来信时间（池子卡片徽章用）。"""
+        clause, params = self._mail_filters(account, None, None, None, None)
+        extra = "alias_hme != ''"
+        clause = (clause + " AND " + extra) if clause else (" WHERE " + extra)
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT alias_hme, COUNT(*) AS n, "
+                "MAX(CASE WHEN date_utc != '' THEN date_utc ELSE fetched_at END) AS last_at "
+                "FROM mails" + clause + " GROUP BY alias_hme",
+                params,
+            ).fetchall()
+        return {
+            str(r["alias_hme"]): {"count": int(r["n"]), "last_mail_at": r["last_at"] or ""}
+            for r in rows
+        }
+
+    def get_mail(self, account: str, mailbox: str, uid: str) -> MailRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM mails WHERE account = ? AND mailbox = ? AND uid = ? LIMIT 1",
+                (account, mailbox, str(uid)),
+            ).fetchone()
+        return self._row_to_mail(row) if row else None
+
+    def get_mail_by_id(self, mail_id: int) -> MailRecord | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM mails WHERE id = ? LIMIT 1", (int(mail_id),)
+            ).fetchone()
+        return self._row_to_mail(row) if row else None
+
+    # ---------- 增量收取水位 ----------
+
+    def get_sync_state(self, account: str, mailbox: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM mail_sync_state WHERE account = ? AND mailbox = ?",
+                (account, mailbox),
+            ).fetchone()
+        if not row:
+            return {
+                "account": account,
+                "mailbox": mailbox,
+                "last_uid": 0,
+                "last_sync_at": "",
+                "last_status": "",
+                "last_error": "",
+                "total_saved": 0,
+            }
+        return dict(row)
+
+    def set_sync_state(
+        self,
+        account: str,
+        mailbox: str,
+        *,
+        last_uid: int,
+        status: str = "ok",
+        error: str = "",
+        saved_delta: int = 0,
+    ) -> None:
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mail_sync_state (
+                    account, mailbox, last_uid, last_sync_at, last_status, last_error, total_saved
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(account, mailbox) DO UPDATE SET
+                    last_uid=MAX(excluded.last_uid, mail_sync_state.last_uid),
+                    last_sync_at=excluded.last_sync_at,
+                    last_status=excluded.last_status,
+                    last_error=excluded.last_error,
+                    total_saved=mail_sync_state.total_saved + excluded.total_saved
+                """,
+                (
+                    account,
+                    mailbox,
+                    max(0, int(last_uid)),
+                    now,
+                    status,
+                    error,
+                    max(0, int(saved_delta)),
+                ),
+            )
+            conn.commit()
+
+    def list_sync_states(self, account: str | None = None) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            if account:
+                rows = conn.execute(
+                    "SELECT * FROM mail_sync_state WHERE account = ? ORDER BY mailbox",
+                    (account,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM mail_sync_state ORDER BY account, mailbox"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---------- 分组（预留，UI 后续再做）----------
+
+    def create_group(
+        self, name: str, *, account: str = "", color: str = "", note: str = ""
+    ) -> dict[str, Any]:
+        label = (name or "").strip()
+        if not label:
+            raise ValueError("分组名称不能为空")
+        now = utc_now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO alias_groups (name, account, color, note, sort_order, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 0, ?, ?)
+                ON CONFLICT(account, name) DO UPDATE SET
+                    color=CASE WHEN excluded.color != '' THEN excluded.color ELSE alias_groups.color END,
+                    note=CASE WHEN excluded.note != '' THEN excluded.note ELSE alias_groups.note END,
+                    updated_at=excluded.updated_at
+                """,
+                (label, (account or "").strip(), color, note, now, now),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM alias_groups WHERE account = ? AND name = ?",
+                ((account or "").strip(), label),
+            ).fetchone()
+            _ = cur
+        return dict(row) if row else {}
+
+    def list_groups(self, account: str | None = None) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            if account:
+                rows = conn.execute(
+                    "SELECT g.*, "
+                    "(SELECT COUNT(*) FROM alias_group_members m WHERE m.group_id = g.id) AS member_count "
+                    "FROM alias_groups g WHERE g.account = ? OR g.account = '' "
+                    "ORDER BY g.sort_order, g.id",
+                    (account,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT g.*, "
+                    "(SELECT COUNT(*) FROM alias_group_members m WHERE m.group_id = g.id) AS member_count "
+                    "FROM alias_groups g ORDER BY g.sort_order, g.id"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def delete_group(self, group_id: int) -> bool:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM alias_group_members WHERE group_id = ?", (int(group_id),)
+            )
+            cur = conn.execute(
+                "DELETE FROM alias_groups WHERE id = ?", (int(group_id),)
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def add_group_member(self, group_id: int, hme: str) -> bool:
+        key = (hme or "").strip().lower()
+        if not key:
+            raise ValueError("hme 不能为空")
+        with self._connect() as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM alias_groups WHERE id = ?", (int(group_id),)
+            ).fetchone()
+            if not exists:
+                raise LookupError(f"分组不存在: {group_id}")
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO alias_group_members (group_id, hme, created_at) "
+                "VALUES (?, ?, ?)",
+                (int(group_id), key, utc_now()),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def remove_group_member(self, group_id: int, hme: str) -> bool:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM alias_group_members WHERE group_id = ? AND hme = ?",
+                (int(group_id), (hme or "").strip().lower()),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def groups_for_hme(self, hme: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT g.* FROM alias_groups g "
+                "JOIN alias_group_members m ON m.group_id = g.id "
+                "WHERE m.hme = ? ORDER BY g.sort_order, g.id",
+                ((hme or "").strip().lower(),),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def group_members_map(self) -> dict[str, list[dict[str, Any]]]:
+        """hme -> 所属分组列表，供别名列表一次性附加分组信息。"""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT m.hme, g.id, g.name, g.color FROM alias_group_members m "
+                "JOIN alias_groups g ON g.id = m.group_id "
+                "ORDER BY g.sort_order, g.id"
+            ).fetchall()
+        out: dict[str, list[dict[str, Any]]] = {}
+        for r in rows:
+            out.setdefault(str(r["hme"]), []).append(
+                {"id": r["id"], "name": r["name"], "color": r["color"]}
+            )
+        return out
+
+    @staticmethod
+    def _row_to_mail(row: sqlite3.Row) -> MailRecord:
+        return MailRecord(
+            id=row["id"],
+            account=row["account"],
+            parent_mail=row["parent_mail"],
+            mailbox=row["mailbox"],
+            uid=row["uid"],
+            message_id=row["message_id"],
+            alias_hme=row["alias_hme"],
+            from_name=row["from_name"],
+            from_addr=row["from_addr"],
+            sender_addr=row["sender_addr"],
+            return_path=row["return_path"],
+            is_relayed=row["is_relayed"],
+            relay_label=row["relay_label"],
+            to_addr=row["to_addr"],
+            delivered_to=row["delivered_to"],
+            subject=row["subject"],
+            mail_type=row["mail_type"],
+            code=row["code"],
+            summary=row["summary"],
+            date_header=row["date_header"],
+            date_utc=row["date_utc"],
+            internaldate=row["internaldate"],
+            size=row["size"],
+            flags_json=row["flags_json"],
+            is_seen=row["is_seen"],
+            has_attachment=row["has_attachment"],
+            attachments_json=row["attachments_json"],
+            body_text_len=row["body_text_len"],
+            body_html_len=row["body_html_len"],
+            content_type=row["content_type"],
+            fetched_at=row["fetched_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

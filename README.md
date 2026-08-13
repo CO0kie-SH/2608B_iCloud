@@ -6,27 +6,27 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.8.11** |
+| **版本** | **26.8.13** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
-| **最后更新** | 2026-08-11 |
+| **最后更新** | 2026-08-13 |
 
 ---
 
-## 版本 26.8.11 变更摘要
+## 版本 26.8.13 变更摘要
 
 | 模块 | 变更 |
 |------|------|
-| 账户格式 | 从 `accounts/*.txt` 全面改为 **YAML**（`.yml` / `.yaml`），一文件一账户 |
-| 多 provider | 支持 `apple` + `163mail` + `inbox`；可缩减；扁平旧写法仍兼容 |
-| CDK 标签 | 创建 HME 默认 `CDK_<sha256>`；安全随机按 OS 切换；DB 映射 CDK→隐私邮箱+母号 |
-| 限流 | 仍强制 **1 小时 / 账户 / 最多 5 个**；`create_events` + `quota` |
-| Cookie 采集 | **Camoufox 有头登录** → 写回 `apple.cookie`（2FA 在浏览器完成） |
-| Camoufox | 二进制仅装到项目 `browsers/camoufox`；`camoufox-fetch` / `camoufox-path` |
-| 邮件 | 多 provider IMAP/SMTP；163 登录后发 IMAP `ID`；`type` / `summary` / `code` |
-| CLI | 新增 `cookie-login`、`camoufox-*`、`cdk`、`quota` 等 |
-| 安全 | `.gitignore`：`accounts/*`、`db/`、`browsers/`、`logs/`、`.env` |
+| WebUI | 新增邮箱池三栏界面、邮件分类、正文详情和后台增量收信 |
+| 生产页 | `/production` 可按 iCloud 账户选择数量与线程，查看实时及历史任务 |
+| 接口选择 | 当前提供“旧版接口（每小时5个）”；“新接口（每小时20个）”保留为禁用选项 |
+| 并发限流 | SQLite 事务原子占位；多线程、多客户端共用每账户滚动一小时配额 |
+| 多端同步 | 客户端打开时登记并获取中央状态，自动触发去重后的全账户收信任务 |
+| 任务持久化 | 生产任务、进度、结果与客户端心跳写入 SQLite，服务重启后历史仍可查询 |
+| 163 收件 | 解析 IMAP modified UTF-7，自动识别并选择 163 的“垃圾邮件”目录 |
+| 邮件正文 | HTML-only 邮件自动生成可读文本，详情页仅显示有内容的文本/HTML视图 |
+| 邮件元数据 | 增加真实发件地址、代发判断、Return-Path、收件别名和附件信息 |
 
-**升级注意：** 旧 `.txt` 账户请按 `accounts/_example.yaml.example` 迁到 YAML；Cookie 421 用 `cookie-login` 重采。
+**升级注意：** 版本仍兼容 26.8.11 的 YAML；首次启动会自动扩展 `db/aliases.db`。Cookie 421 用 `cookie-login` 重采。
 
 ---
 
@@ -39,8 +39,9 @@
 | 范围 | **按账户分别计数**（互不影响） |
 | 窗口 | **滚动 1 小时**（非自然整点） |
 | 上限 | **5 个 / 小时 / 账户** |
-| 实现 | 代码强制：`create_alias` 创建前检查，超限直接拒绝 |
+| 实现 | `create_alias` 创建前通过 SQLite 事务原子占位；失败释放，成功记账 |
 | 记录 | 表 `create_events` 记录每次成功创建的本地 UTC 时间 |
+| 并发 | Web 线程和多个浏览器客户端共用数据库配额，不按客户端分别计数 |
 | 常量 | `tools/rate_limit.py` → `HME_CREATE_LIMIT_PER_HOUR = 5` |
 
 **原因：** 短时间大量创建会触发 Apple 限流（如 `-41015`），严重时导致账户暂时不可用。**禁止绕过。**
@@ -62,8 +63,11 @@ python main.py quota -a user001@icloud.com
 | 限流 | 1 小时 5 个创建硬限制 + 配额查询 |
 | 安全随机 | 按 OS 切换：Linux `getrandom`/`urandom`，Windows/macOS `secrets` |
 | 邮件 | IMAP/SMTP；`type`/`summary`/`code`；按 UID 取 JSON |
+| WebUI | 邮箱池、邮件分类、文本/HTML详情、后台增量同步 |
+| 生产 | 按账号控制数量和线程；任务进度与结果持久化 |
+| 多客户端 | 打开即同步；生产历史、配额和邮件状态以服务器 SQLite 为准 |
 | Cookie 采集 | Camoufox **有头**登录 iCloud → 写回 `apple.cookie`（2FA 在浏览器完成） |
-| CLI | `main.py` 子命令；`generate_alias.bat` |
+| CLI | `main.py` 子命令；`generate_alias.bat`；`start_web.bat` |
 
 ---
 
@@ -73,6 +77,7 @@ python main.py quota -a user001@icloud.com
 2608B_iCloud/
 ├── main.py
 ├── generate_alias.bat
+├── start_web.bat
 ├── requirements.txt
 ├── .env / .env.example          # 本地密钥，勿提交
 ├── README.md
@@ -85,6 +90,13 @@ python main.py quota -a user001@icloud.com
 │   └── aliases.db               # 本地库（勿提交）
 ├── scripts/
 │   └── generate_alias.py
+├── web/
+│   ├── __init__.py
+│   ├── app.py                  # FastAPI 应用
+│   ├── jobs.py                 # 收信/生产后台任务
+│   ├── routers/                # Web API
+│   ├── static/                 # 邮箱池与生产页前端
+│   └── templates/              # HTML 页面
 └── tools/
     ├── config.py                # .env → Settings
     ├── cookies.py
@@ -95,9 +107,11 @@ python main.py quota -a user001@icloud.com
     ├── client.py                # HME HTTP（Cookie）
     ├── hme.py                   # list / create_alias / on/off + CDK 标签
     ├── secure_random.py         # 跨平台安全随机
-    ├── db.py                    # SQLite：CDK 映射 / 配额
+    ├── db.py                    # SQLite：CDK / 配额 / 邮件 / 任务 / 客户端
     ├── rate_limit.py            # 1h/5
-    └── mail.py                  # IMAP/SMTP + get_mail_by_uid
+    ├── mail.py                  # IMAP/SMTP + MIME/目录解析
+    ├── mail_sync.py             # 增量收信入库
+    └── production.py            # 多线程 HME 生产流水线
 ```
 
 ---
@@ -108,7 +122,7 @@ python main.py quota -a user001@icloud.com
 D:\0Code2\py312\python.exe -m pip install -r requirements.txt
 ```
 
-依赖：`python-dotenv`、`requests`、`PyYAML`、`camoufox[geoip]`。
+依赖：`python-dotenv`、`requests`、`PyYAML`、`camoufox[geoip]`、`FastAPI`、`Uvicorn`、`Jinja2`、`Pydantic`。
 
 ### Camoufox（项目内二进制）
 
@@ -219,6 +233,74 @@ cookie: "X-APPLE-...; ..."
 
 ---
 
+## 启动 WebUI
+
+```powershell
+& 'D:\0Code2\py312\python.exe' main.py web --host 127.0.0.1 --port 8770
+```
+
+也可以直接运行：
+
+```bat
+start_web.bat
+start_web.bat 8771
+```
+
+| 页面 | 地址 | 用途 |
+|------|------|------|
+| 邮箱池 | `http://127.0.0.1:8770/` | 账户、隐私邮箱、分类邮件与正文详情 |
+| 生产 | `http://127.0.0.1:8770/production` | 按 iCloud 账户生产 HME、查看配额和任务 |
+| API 文档 | `http://127.0.0.1:8770/api/docs` | OpenAPI 交互文档 |
+
+生产页参数：
+
+| 参数 | 当前规则 |
+|------|----------|
+| iCloud 账号 | 精确到单个账户，配额互相独立 |
+| 生产接口 | `legacy`：旧版接口（每小时5个） |
+| 生产数量 | 旧版接口单次 `1-5` |
+| 并发线程 | `1-5`；每个线程使用独立 Apple 会话 |
+
+页面打开后会调用 `POST /api/client-sync/open`：登记当前客户端、读取生产任务与配额快照，并自动提交一次全账户增量收信。多个客户端同时打开时，相同范围的运行中收信任务会去重。
+
+> 多端共享的前提是所有客户端访问同一个服务器实例和同一份 `db/aliases.db`。SQLite 适合单服务器多客户端；部署多个独立服务实例时应使用共享数据库或只运行一个写入实例。
+
+### Web API
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/accounts` | 账户、provider、邮件数和创建配额 |
+| `GET` | `/api/aliases` | 本地隐私邮箱池 |
+| `POST` | `/api/aliases/refresh` | 从 iCloud 同步某账户的别名 |
+| `GET` | `/api/mails` | 邮件元数据列表 |
+| `GET` | `/api/mails/{account}/{mailbox}/{uid}` | 实时拉取单封正文 |
+| `POST` | `/api/sync` | 提交后台增量收信任务 |
+| `GET` | `/api/sync/{job_id}` | 查询收信任务 |
+| `GET` | `/api/production/options` | 生产接口、账户和配额 |
+| `POST` | `/api/production` | 提交生产任务 |
+| `GET` | `/api/production/jobs` | 查询持久化生产历史 |
+| `GET` | `/api/production/jobs/{job_id}` | 查询一个生产任务 |
+| `POST` | `/api/client-sync/open` | 客户端打开同步快照与自动收信 |
+
+提交一个旧版生产任务：
+
+```powershell
+$body = @{
+  account = 'user001@icloud.com'
+  interface = 'legacy'
+  count = 1
+  threads = 1
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Uri 'http://127.0.0.1:8770/api/production' `
+  -Method Post `
+  -ContentType 'application/json' `
+  -Body $body
+```
+
+---
+
 ## CDK 标签与数据库映射（核心）
 
 ### 标签格式
@@ -289,6 +371,16 @@ CDK_xxx  →  {
 ### 表 `create_events`（限流）
 
 记录每次成功创建：`account`、`parent_mail`、`hme`、`cdk`、`label`、`created_at`。
+
+并发与多端相关表：
+
+| 表 | 用途 |
+|----|------|
+| `create_claims` | 创建前原子占位；防止多线程同时越过每小时上限 |
+| `production_jobs` | 持久化生产任务、进度、结果和错误 |
+| `client_sync_state` | 记录多客户端最近打开时间 |
+| `mails` | 邮件元数据和分类结果；正文不落库 |
+| `mail_sync_state` | 每账户、每目录的增量 UID 水位 |
 
 ### CDK 查询 API
 
@@ -385,8 +477,10 @@ python main.py mail-send -a user001@icloud.com --to someone@example.com --subjec
 | **`type`** | 类型：`code` / `welcome` / `invite` / `other`… |
 | **`summary`** | 摘要（验证码邮件如 `验证码 253708（…）`） |
 | **`code`** | 解析出的验证码（非 code 为空） |
-| `body_text` / `body_html` | 正文 |
+| `body_text` / `body_html` | 可读文本 / 原始 HTML；HTML-only 邮件会自动生成 `body_text` |
 | `flags` / `size` / `attachments` | 标志 / 大小 / 附件元数据 |
+| `from_addr` / `sender_addr` | 展示发件地址 / 实际代发地址 |
+| `return_path_addr` | 信封退信地址（邮件投递失败时使用） |
 
 ```python
 from tools.mail import get_mail_by_uid
@@ -456,7 +550,7 @@ inbox:
   mail: user@163.com   # 可选；不写则优先 apple，否则第一个 ready 的 provider
 ```
 
-文件夹：iCloud 常用 `INBOX` / `Junk` / …；163 另有中文箱名（`已发送` 等），`INBOX` 通用。
+文件夹：iCloud 常用 `INBOX` / `Junk` / …；163 的“垃圾邮件”等中文目录通过 IMAP modified UTF-7 返回。程序会解析 `LIST`、按 `\Junk` 或中文名识别目录，并在 `SELECT` 时使用真实编码箱名；数据库和 Web API 统一保存逻辑名 `Junk`。
 
 ---
 
@@ -474,7 +568,10 @@ inbox:
 | `secure_random.py` | 跨平台 `secure_random_bytes` |
 | `db.py` | `AliasDB`：CDK 映射、配额、`resolve_cdk` |
 | `rate_limit.py` | `HME_CREATE_LIMIT_PER_HOUR=5` |
-| `mail.py` | 多 provider 邮件客户端（apple/163）+ `type`/`summary`/`code` |
+| `mail.py` | 多 provider 邮件客户端、UTF-7、MIME、`type`/`summary`/`code` |
+| `mail_sync.py` | IMAP 增量同步、分类与元数据入库 |
+| `production.py` | 按账户多线程生产 HME |
+| `web/` | FastAPI WebUI、生产页、后台任务和多端同步 API |
 
 ---
 
@@ -498,6 +595,7 @@ python main.py list -a user001@icloud.com
 python main.py cdk --list-map
 python main.py mail-probe -a user001@icloud.com
 python main.py mail-inbox -a user001@icloud.com -n 3 --no-body
+python main.py web --port 8770
 ```
 
 Cookie 421 → `python main.py cookie-login -a <账户>`（或手工改 YAML 的 `apple.cookie` / `cookie`）。

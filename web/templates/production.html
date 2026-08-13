@@ -1,0 +1,34 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_name }} · 生产</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">+</span><div><div class="brand-name">{{ app_name }}</div><div class="brand-sub">隐私邮箱生产</div></div></div>
+  <nav class="page-nav"><a href="/">邮箱池子</a><a class="active" href="/production">生产</a></nav>
+</header>
+<main class="production-layout">
+  <section class="production-panel">
+    <div class="col-head"><h1>生产隐私邮箱</h1><span class="badge">按 iCloud 账号独立限流</span></div>
+    <form id="productionForm" class="production-form">
+      <label class="field-stack"><span class="field-label">iCloud 账号</span><select id="productionAccount" required></select></label>
+      <label class="field-stack"><span class="field-label">生产接口</span><select id="productionInterface"><option value="legacy">旧版接口（每小时5个）</option><option disabled>新接口（每小时20个）</option></select></label>
+      <label class="field-stack"><span class="field-label">生产数量</span><input id="productionCount" type="number" min="1" max="5" value="1" required></label>
+      <label class="field-stack"><span class="field-label">并发线程</span><input id="productionThreads" type="number" min="1" max="5" value="1" required></label>
+      <div id="productionQuota" class="quota-panel"></div>
+      <button class="btn btn-primary" type="submit" id="productionStart">开始生产</button>
+    </form>
+  </section>
+  <section class="production-panel production-status">
+    <div class="col-head"><h2>任务状态</h2><button class="btn btn-ghost" id="productionRefresh">同步状态</button></div>
+    <div id="productionJobs" class="production-jobs"></div>
+  </section>
+</main>
+<div id="productionToast" class="toast hidden"></div>
+<script src="/static/production.js"></script>
+</body>
+</html>
