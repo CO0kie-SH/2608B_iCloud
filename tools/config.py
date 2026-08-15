@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import lru_cache
 from pathlib import Path
 
@@ -78,6 +78,95 @@ class Settings:
     @property
     def setup_host(self) -> str:
         return f"https://setup.{self.domain}"
+
+    @property
+    def is_cn(self) -> bool:
+        return self.domain.endswith(".cn") or self.domain == "icloud.com.cn"
+
+    @property
+    def appleid_origin(self) -> str:
+        # Apple 账户邮箱出现在 iCloud 设置页，不是 appleid.apple.com.cn（这个域名不存在）
+        return f"{self.origin}/settings"
+
+
+ICLOUD_REGION_PRESETS: dict[str, str] = {
+    "cn": "icloud.com.cn",
+    "china": "icloud.com.cn",
+    "com.cn": "icloud.com.cn",
+    "us": "icloud.com",
+    "global": "icloud.com",
+    "intl": "icloud.com",
+    "com": "icloud.com",
+}
+
+
+def resolve_icloud_domain(
+    *,
+    region: str | None = None,
+    suffix: str | None = None,
+    domain: str | None = None,
+    default: str = "icloud.com",
+) -> str:
+    """区域 / 后缀 → iCloud Web 域名。cn 预选为 icloud.com.cn。"""
+    if domain and str(domain).strip():
+        raw = str(domain).strip().lower().lstrip(".")
+        if raw in ICLOUD_REGION_PRESETS:
+            return ICLOUD_REGION_PRESETS[raw]
+        return raw if raw.startswith("icloud.") else f"icloud.{raw}"
+
+    if suffix and str(suffix).strip():
+        tail = str(suffix).strip().lower().lstrip(".")
+        if tail in {"cn", "com.cn"}:
+            return "icloud.com.cn"
+        if tail == "com":
+            return "icloud.com"
+        return f"icloud.{tail}"
+
+    if region and str(region).strip():
+        key = str(region).strip().lower().lstrip(".")
+        if key in ICLOUD_REGION_PRESETS:
+            return ICLOUD_REGION_PRESETS[key]
+        if key.startswith("icloud."):
+            return key
+        if key in {"cn", "com.cn"}:
+            return "icloud.com.cn"
+        return f"icloud.{key}"
+
+    return default
+
+
+def settings_with_domain(settings: Settings, domain: str) -> Settings:
+    target = (domain or "").strip().lower()
+    if not target or target == settings.domain:
+        return settings
+    return replace(settings, domain=target)
+
+
+def apply_cli_domain(settings: Settings, args: object | None) -> Settings:
+    if args is None:
+        return settings
+    override = resolve_icloud_domain(
+        region=getattr(args, "region", None),
+        suffix=getattr(args, "suffix", None),
+        domain=getattr(args, "domain", None),
+        default="",
+    )
+    return settings_with_domain(settings, override) if override else settings
+
+
+def add_region_arguments(parser) -> None:
+    parser.add_argument(
+        "--region",
+        default=None,
+        metavar="CODE",
+        help="iCloud 区域：cn → icloud.com.cn；us/global/com → icloud.com",
+    )
+    parser.add_argument(
+        "--suffix",
+        default=None,
+        metavar="SFX",
+        help="网址后缀，如 com / com.cn / cn（cn 与 com.cn 都是 icloud.com.cn）",
+    )
 
 
 def load_settings(env_path: Path | None = None) -> Settings:

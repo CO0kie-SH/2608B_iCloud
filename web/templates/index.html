@@ -29,6 +29,7 @@
     <a class="btn btn-ghost nav-button" href="/production">生产</a>
     <button id="btnSyncAliases" class="btn btn-ghost" title="从 iCloud 拉取隐私邮箱列表">同步隐私</button>
     <button id="btnSyncMails" class="btn btn-primary" title="从 IMAP 增量收取邮件">收取邮件</button>
+    <button id="btnSettings" class="btn btn-ghost" type="button" aria-expanded="false" title="界面设置">设置</button>
   </div>
 </header>
 
@@ -39,6 +40,21 @@
 </div>
 
 <div id="toast" class="toast hidden"></div>
+<div id="settingsMask" class="settings-mask hidden"></div>
+<aside id="settingsPanel" class="settings-panel hidden" role="dialog" aria-labelledby="settingsTitle">
+  <div class="settings-head">
+    <h2 id="settingsTitle">界面设置</h2>
+    <button id="settingsClose" class="btn-icon" type="button" title="关闭">×</button>
+  </div>
+  <div class="settings-body">
+    <label class="field-stack">
+      <span class="field-label">显示时区</span>
+      <select id="settingsUtcOffset"></select>
+    </label>
+    <p class="settings-hint">只改网页时间显示。服务端、数据库和风控仍按 UTC+0。</p>
+    <p class="settings-preview">当前显示：<b id="settingsTimePreview"></b></p>
+  </div>
+</aside>
 
 <main class="layout">
 
@@ -90,6 +106,7 @@
   <div id="drawerBody" class="drawer-body"></div>
 </aside>
 
+<script src="/static/settings.js"></script>
 <script src="/static/app.js"></script>
 </body>
 </html>

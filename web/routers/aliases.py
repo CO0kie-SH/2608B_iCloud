@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, Query
 
-from tools.client import ICloudHMEClient
+from tools.client import CookieInvalidError, ICloudError, ICloudHMEClient, is_cookie_failure
 from tools.hme import HMEService
 from web.deps import get_db, get_settings, parent_mail_of, resolve_account
 from web.schemas import AliasOut, alias_to_out
@@ -59,17 +59,22 @@ def set_alias_active(
     """启停别名转发。需要有效 cookie。"""
     active = bool(payload.get("active", True))
     acc = resolve_account(account or payload.get("account"))
-    if not acc.ok:
-        raise HTTPException(
-            status_code=409,
-            detail=f"[{acc.name}] cookie 不完整或已失效，请先在命令行运行 cookie-login",
-        )
-    settings = get_settings()
-    with ICloudHMEClient(settings, acc.cookies) as client:
-        svc = HMEService(client)
-        res = svc.set_active(anonymous_id, active)
-
     db = get_db()
+    db.assert_cookie_ready(acc.name)
+    if not acc.ok:
+        db.mark_cookie_invalid(acc.name, reason="cookie_incomplete")
+        raise CookieInvalidError(acc.name, reason="cookie_incomplete")
+    settings = get_settings()
+    try:
+        with ICloudHMEClient(settings, acc.cookies) as client:
+            svc = HMEService(client)
+            res = svc.set_active(anonymous_id, active)
+    except ICloudError as exc:
+        if is_cookie_failure(exc):
+            db.mark_cookie_invalid(acc.name, reason="http_421")
+            raise CookieInvalidError(acc.name, reason="http_421") from exc
+        raise
+
     db.set_active(acc.name, anonymous_id, active)
     return {"ok": True, "anonymous_id": anonymous_id, "active": active, "result": res}
 
@@ -81,16 +86,20 @@ def refresh_aliases(
 ) -> dict[str, Any]:
     """从 iCloud 拉取别名列表并同步进本地库（等价于 CLI 的 list）。"""
     acc = resolve_account(account or payload.get("account"))
-    if not acc.ok:
-        raise HTTPException(
-            status_code=409,
-            detail=f"[{acc.name}] cookie 不完整或已失效，请先在命令行运行 cookie-login",
-        )
-    settings = get_settings()
-    with ICloudHMEClient(settings, acc.cookies) as client:
-        aliases = HMEService(client).list_aliases()
-
     db = get_db()
+    db.assert_cookie_ready(acc.name)
+    if not acc.ok:
+        db.mark_cookie_invalid(acc.name, reason="cookie_incomplete")
+        raise CookieInvalidError(acc.name, reason="cookie_incomplete")
+    settings = get_settings()
+    try:
+        with ICloudHMEClient(settings, acc.cookies) as client:
+            aliases = HMEService(client).list_aliases()
+    except ICloudError as exc:
+        if is_cookie_failure(exc):
+            db.mark_cookie_invalid(acc.name, reason="http_421")
+            raise CookieInvalidError(acc.name, reason="http_421") from exc
+        raise
     for a in aliases:
         db.upsert_alias(
             account=acc.name,

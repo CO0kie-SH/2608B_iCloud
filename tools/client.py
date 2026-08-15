@@ -13,6 +13,31 @@ class ICloudError(RuntimeError):
     pass
 
 
+class CookieInvalidError(RuntimeError):
+    """账户已被标记为 cookie 失效，禁止再走生产。"""
+
+    code = "COOKIE_INVALID"
+
+    def __init__(self, account: str, reason: str = "", marked_at: int = 0) -> None:
+        self.account = account
+        self.reason = reason or "cookie_invalid"
+        self.marked_at = int(marked_at or 0)
+        extra = f" reason={self.reason}" if self.reason else ""
+        when = f" marked_at={self.marked_at}" if self.marked_at else ""
+        super().__init__(
+            f"{self.code}: account={account} cookie 已失效，已移出生产线。"
+            f"请执行 python main.py cookie-login -a {account} 重新采集"
+            f"{extra}{when}"
+        )
+
+
+def is_cookie_failure(exc: BaseException | str) -> bool:
+    if isinstance(exc, CookieInvalidError):
+        return True
+    msg = str(exc)
+    return "421" in msg or "Cookie 已失效" in msg or "COOKIE_INVALID" in msg
+
+
 class ICloudHMEClient:
     """iCloud Hide My Email HTTP 客户端（Cookie 会话）。"""
 
@@ -70,7 +95,7 @@ class ICloudHMEClient:
             if resp.status_code == 421:
                 raise ICloudError(
                     "HTTP 421: Cookie 已失效，请执行 "
-                    "python main.py cookie-login -a <账户> 重新采集"
+                    "python main.py cookie-login -a ACCOUNT 重新采集"
                 )
             raise ICloudError(f"HTTP {resp.status_code}: {body}")
 

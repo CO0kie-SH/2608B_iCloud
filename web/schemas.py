@@ -50,6 +50,10 @@ class AccountOut(BaseModel):
     quota_limit: int
     quota_remaining: int
     quota_retry_after_sec: int
+    last_produce_at: int = 0
+    next_produce_at: int = 0
+    cookie_invalid: bool = False
+    cookie_invalid_reason: str = ""
     format_errors: list[str]
     missing_cookie_keys: list[str]
 

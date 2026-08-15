@@ -217,7 +217,11 @@ class HMEService:
             # 而本地配额回退，导致后续请求越过真实限制。
             if event_recorded:
                 store.release_create_claim(claim_id)
-        print(f"[rate-limit] recorded create_event at {created_at} for {alias.hme}")
+        quota = store.get_create_quota(account)
+        print(
+            f"[rate-limit] recorded create_event at {created_at} for {alias.hme} "
+            f"produce_at={quota.last_produce_at} next_produce_at={quota.next_produce_at}"
+        )
         print(f"[cdk-map] {cdk} -> hme={alias.hme} parent={account}")
         return alias
 

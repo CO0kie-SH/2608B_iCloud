@@ -32,14 +32,29 @@ function toast(message, kind = "") {
   setTimeout(() => el.classList.add("hidden"), 3500);
 }
 
+function fmtUnix(sec) {
+  return window.UiSettings.formatUnixTime(sec);
+}
+
+function fmtJobTime(value) {
+  return window.UiSettings.formatServerTime(value, { withSeconds: true }) || value || "等待中";
+}
+
 function renderQuota() {
   const account = state.accounts.find((item) => item.name === byId("productionAccount").value);
+  const remaining = account ? Math.max(0, Number(account.quota_remaining) || 0) : 0;
+  const retry = account ? Math.max(0, Number(account.quota_retry_after_sec) || 0) : 0;
+  const blocked = Boolean(account && (account.cookie_invalid || !account.hme_ok));
   byId("productionQuota").innerHTML = account ? `
     <b>${escapeHtml(account.name)}</b>
     <span>本小时已用 ${account.quota_used}/${account.quota_limit}</span>
-    <span>剩余 ${account.quota_remaining} 个</span>
-    ${account.hme_ok ? "" : "<em>Cookie 不可用</em>"}` : "";
-  byId("productionCount").max = account ? Math.max(1, Math.min(5, account.quota_remaining || 1)) : 1;
+    <span>剩余 ${remaining} 个</span>
+    <span>上次 ${fmtUnix(account.last_produce_at)}</span>
+    <span>下次 ${fmtUnix(account.next_produce_at)}</span>
+    ${retry ? `<span>冷却 ${Math.ceil(retry / 60)} 分钟</span>` : ""}
+    ${blocked ? "<em>Cookie 已失效，已移出生产线</em>" : ""}` : "";
+  byId("productionCount").max = remaining > 0 ? 1 : 1;
+  byId("productionStart").disabled = Boolean(account && (blocked || remaining <= 0));
 }
 
 function renderJobs() {
@@ -48,8 +63,8 @@ function renderJobs() {
   box.innerHTML = state.jobs.map((job) => `
     <article class="production-job">
       <div class="job-head"><b>${escapeHtml(job.account)}</b><span class="tag ${job.status === "done" ? "tag-ok" : job.status === "error" ? "tag-danger" : "tag-running"}">${escapeHtml(job.status)}</span></div>
-      <div class="job-meta">${escapeHtml(job.started_at || "等待中")} · ${escapeHtml(job.interface)}${job.result?.threads ? ` · ${job.result.threads} 线程` : ""}</div>
-      <div class="job-progress">${(job.progress || []).slice(-3).map(escapeHtml).join("<br>")}</div>
+      <div class="job-meta">${escapeHtml(fmtJobTime(job.started_at))} · ${escapeHtml(job.interface)}${job.result?.threads ? ` · ${job.result.threads} 线程` : ""}</div>
+      <div class="job-progress">${(job.progress || []).slice(-3).map((line) => escapeHtml(window.UiSettings.shiftLeadingUtcStamp(line))).join("<br>")}</div>
       ${job.result?.created ? `<div class="job-created">已生产 ${job.result.created} 个：${job.result.items.map((item) => escapeHtml(item.hme)).join("、")}</div>` : ""}
       ${job.error ? `<div class="err-text">${escapeHtml(job.error)}</div>` : ""}
     </article>`).join("");
@@ -88,6 +103,11 @@ async function syncOnOpen() {
   await refresh();
 }
 
+window.UiSettings.bind();
+window.addEventListener(window.UiSettings.eventName, () => {
+  renderQuota();
+  renderJobs();
+});
 byId("productionForm").addEventListener("submit", startProduction);
 byId("productionAccount").addEventListener("change", renderQuota);
 byId("productionRefresh").addEventListener("click", refresh);

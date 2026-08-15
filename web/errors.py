@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from tools.client import ICloudError
+from tools.client import CookieInvalidError, ICloudError
 from tools.rate_limit import HMECreateRateLimitError
 
 
@@ -22,6 +22,13 @@ def _server_error(exc: Exception) -> JSONResponse:
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(CookieInvalidError)
+    async def _cookie_invalid(_: Request, exc: CookieInvalidError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content=_payload("COOKIE_INVALID", str(exc)),
+        )
+
     @app.exception_handler(HMECreateRateLimitError)
     async def _rate_limit(_: Request, exc: HMECreateRateLimitError) -> JSONResponse:
         retry = max(1, int(getattr(exc, "retry_after_sec", 0) or 1))
@@ -35,7 +42,7 @@ def register_error_handlers(app: FastAPI) -> None:
     async def _icloud(_: Request, exc: ICloudError) -> JSONResponse:
         msg = str(exc)
         # 421 / cookie 失效需要用户去跑 CLI 的 cookie-login，前端要能区分出来
-        code = "cookie_invalid" if ("421" in msg or "Cookie" in msg) else "upstream_error"
+        code = "COOKIE_INVALID" if ("421" in msg or "Cookie" in msg or "COOKIE_INVALID" in msg) else "upstream_error"
         return JSONResponse(status_code=502, content=_payload(code, msg))
 
     @app.exception_handler(LookupError)

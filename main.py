@@ -11,14 +11,19 @@ from tools.camoufox_runtime import (
     fetch_browser,
     resolve_camoufox_dir,
 )
-from tools.client import ICloudError, ICloudHMEClient
-from tools.config import load_settings
+from tools.client import CookieInvalidError, ICloudError, ICloudHMEClient, is_cookie_failure
+from tools.config import add_region_arguments, apply_cli_domain, load_settings
 from tools.cookie_capture import CookieCaptureOptions, capture_icloud_cookie
 from tools.db import AliasDB
 from tools.hme import HMEService
 from tools.logging_setup import setup_logger
 from tools.mail import ICloudMailClient, get_mail_by_uid, mail_client_from_account
-from tools.rate_limit import HME_CREATE_LIMIT_PER_HOUR, HMECreateRateLimitError
+from tools.rate_limit import (
+    HME_CREATE_LIMIT_PER_HOUR,
+    HME_CREATE_MAX_INTERVAL_MINUTES,
+    HME_CREATE_MIN_INTERVAL_MINUTES,
+    HMECreateRateLimitError,
+)
 
 
 def get_db() -> AliasDB:
@@ -26,8 +31,8 @@ def get_db() -> AliasDB:
     return AliasDB(settings.base_dir / "db" / "aliases.db")
 
 
-def cmd_accounts(_: argparse.Namespace) -> int:
-    settings = load_settings()
+def cmd_accounts(args: argparse.Namespace) -> int:
+    settings = apply_cli_domain(load_settings(), args)
     files, accounts = load_all_accounts(settings.accounts_files, settings.base_dir)
 
     print(f"{settings.app_name} (domain={settings.domain})")
@@ -36,6 +41,7 @@ def cmd_accounts(_: argparse.Namespace) -> int:
         flag = "" if f.exists() else " (missing)"
         print(f"  - {f}{flag}")
     print(f"loaded {len(accounts)} account(s)")
+    db = get_db()
     for a in accounts:
         print(f"  - {a.summary()}")
         if a.format_errors:
@@ -44,10 +50,13 @@ def cmd_accounts(_: argparse.Namespace) -> int:
         inbox = a.resolve_inbox()
         inbox_s = f"{inbox.name}:{inbox.mail}" if inbox and inbox.mail else "-"
         apple_s = a.apple_id or "-"
+        flag = db.get_account_flag(a.name) or {}
+        marked = bool(flag.get("cookie_invalid"))
         print(
             f"    mail={a.mail or '-'}  appleid={apple_s}  "
             f"providers=[{prov_names}]  inbox={inbox_s}  "
-            f"hme_ok={a.ok}  mail_ready={a.mail_ready}"
+            f"hme_ok={a.ok and not marked}  mail_ready={a.mail_ready}  "
+            f"cookie_invalid={marked}"
         )
         if settings.debug and a.cookies:
             preview = a.cookies[:60] + ("..." if len(a.cookies) > 60 else "")
@@ -55,8 +64,8 @@ def cmd_accounts(_: argparse.Namespace) -> int:
     return 0
 
 
-def _pick_account(name: str | None):
-    settings = load_settings()
+def _pick_account(name: str | None, args: argparse.Namespace | None = None):
+    settings = apply_cli_domain(load_settings(), args)
     _, accounts = load_all_accounts(settings.accounts_files, settings.base_dir)
     if not accounts:
         raise SystemExit("未加载到任何账户，请检查 accounts/ 与 .env")
@@ -76,7 +85,11 @@ def _pick_account(name: str | None):
 
 
 def cmd_list(args: argparse.Namespace) -> int:
-    settings, account = _pick_account(args.account)
+    settings, account = _pick_account(args.account, args)
+    db = get_db()
+    if db.is_cookie_invalid(account.name):
+        print(f"[{account.name}] COOKIE_INVALID: 已标记失效，跳过 iCloud 拉取")
+        return 3
     if not account.ok:
         print(f"警告: cookie 可能不完整 -> {account.summary()}")
 
@@ -85,10 +98,12 @@ def cmd_list(args: argparse.Namespace) -> int:
             svc = HMEService(client)
             aliases = svc.list_aliases()
     except (ICloudError, RuntimeError) as e:
+        if is_cookie_failure(e):
+            db.mark_cookie_invalid(account.name, reason="http_421")
+            print(f"[{account.name}] COOKIE_INVALID: {e}")
+            return 3
         print(f"[{account.name}] 失败: {e}")
         return 1
-
-    db = get_db()
     for a in aliases:
         db.upsert_alias(
             account=account.name,
@@ -150,9 +165,10 @@ def cmd_cdk(args: argparse.Namespace) -> int:
 
 
 def cmd_generate(args: argparse.Namespace) -> int:
-    settings, account = _pick_account(args.account)
+    settings, account = _pick_account(args.account, args)
     db = get_db()
     try:
+        db.assert_cookie_ready(account.name)
         with ICloudHMEClient(settings, account.cookies) as client:
             svc = HMEService(client, db=db)
             alias = svc.create_alias(
@@ -161,10 +177,17 @@ def cmd_generate(args: argparse.Namespace) -> int:
                 note=args.note,
                 cdk_hex_len=args.cdk_hex_len,
             )
+    except CookieInvalidError as e:
+        print(f"[{account.name}] {e}")
+        return 3
     except HMECreateRateLimitError as e:
         print(f"[{account.name}] 拒绝创建（规矩：1小时最多{HME_CREATE_LIMIT_PER_HOUR}个）: {e}")
         return 2
     except (ICloudError, RuntimeError, ValueError) as e:
+        if is_cookie_failure(e):
+            db.mark_cookie_invalid(account.name, reason="http_421")
+            print(f"[{account.name}] COOKIE_INVALID: {e}")
+            return 3
         print(f"[{account.name}] 生成失败: {e}")
         return 1
 
@@ -181,7 +204,10 @@ def cmd_generate(args: argparse.Namespace) -> int:
             f"hme={resolved.get('hme')} parent={resolved.get('parent_mail')}"
         )
     q = db.get_create_quota(account.name)
-    print(f"  quota: {q.used}/{q.limit} in 1h, remaining={q.remaining}")
+    print(
+        f"  quota: {q.used}/{q.limit} in 1h, remaining={q.remaining} "
+        f"next_produce_at={q.next_produce_at}"
+    )
     print(f"  saved -> {db.db_path}")
     return 0
 
@@ -198,17 +224,26 @@ def cmd_quota(args: argparse.Namespace) -> int:
             return 1
         targets = [acc]
 
-    print(f"规矩: 每账户滚动1小时最多创建 {HME_CREATE_LIMIT_PER_HOUR} 个隐私邮箱")
+    print(
+        f"规矩: 每账户滚动1小时最多创建 {HME_CREATE_LIMIT_PER_HOUR} 个；"
+        f"两次生产间隔 {HME_CREATE_MIN_INTERVAL_MINUTES}-{HME_CREATE_MAX_INTERVAL_MINUTES} 分钟"
+    )
     for acc in targets:
         q = db.get_create_quota(acc.name)
-        print(f"[{acc.name}] used={q.used}/{q.limit} remaining={q.remaining} retry_after={q.retry_after_sec}s")
+        print(
+            f"[{acc.name}] used={q.used}/{q.limit} remaining={q.remaining} "
+            f"retry_after={q.retry_after_sec}s last={q.last_produce_at} next={q.next_produce_at}"
+        )
         for ev in q.recent:
-            print(f"  - {ev['created_at']}  {ev['hme']}  label={ev['label']}")
+            print(
+                f"  - {ev['created_at']}  {ev['hme']}  label={ev['label']} "
+                f"produce_at={ev.get('produce_at') or 0} next_produce_at={ev.get('next_produce_at') or 0}"
+            )
     return 0
 
 
 def cmd_toggle(args: argparse.Namespace) -> int:
-    settings, account = _pick_account(args.account)
+    settings, account = _pick_account(args.account, args)
     active = args.action == "on"
     try:
         with ICloudHMEClient(settings, account.cookies) as client:
@@ -412,10 +447,18 @@ def cmd_web(args: argparse.Namespace) -> int:
             "缺少 uvicorn，请先安装：pip install -r requirements.txt"
         ) from None
 
+    import os
+
+    settings = apply_cli_domain(load_settings(), args)
+    os.environ["ICLOUD_DOMAIN"] = settings.domain
+    from web.deps import get_settings
+
+    get_settings.cache_clear()
+
     # 复用模块级单例，避免重复装配（重复解析账户、重复挂载静态目录）
     from web.app import app
 
-    _safe_print(f"Web 已启动: http://{args.host}:{args.port}")
+    _safe_print(f"Web 已启动: http://{args.host}:{args.port}  domain={settings.domain}")
     uvicorn.run(app, host=args.host, port=args.port, log_level=args.log_level)
     return 0
 
@@ -462,7 +505,7 @@ def cmd_camoufox_path(_: argparse.Namespace) -> int:
 
 
 def cmd_cookie_login(args: argparse.Namespace) -> int:
-    settings, account = _pick_account(args.account)
+    settings, account = _pick_account(args.account, args)
     logger, log_path = setup_logger(
         "2608b.cookie_login",
         _log_dir(settings),
@@ -482,14 +525,31 @@ def cmd_cookie_login(args: argparse.Namespace) -> int:
     print(f"account: {account.name}")
     print(f"file: {account.source}")
     print(f"log: {log_path}")
+    print(f"region domain: {settings.domain}  origin: {settings.origin}")
     print("模式: 有头浏览器 — 请在窗口内登录；2FA 验证码在浏览器里输入")
     print("等待必填 Cookie 齐全后自动写回 YAML…")
+    if getattr(args, "keep_open", 0):
+        print(f"采集成功后浏览器再挂 {int(args.keep_open)} 秒再关")
+    if getattr(args, "debug", False):
+        print("debug: 页面内容变化时落盘 HTML/文本，目录见 logs/page-debug-...")
+    reuse = not bool(getattr(args, "no_reuse_session", False))
+    if reuse:
+        print("session: 尝试从 db/cookie/ 注入上次会话，并在本次写回")
+    start_url = args.url
+    follow_appleid = bool(getattr(args, "appleid", False))
+    if follow_appleid:
+        print(f"login: {settings.origin}/  登录成功后再打开 {settings.appleid_origin}/")
 
     opts = CookieCaptureOptions(
         headless=False,
         timeout_sec=float(args.timeout),
-        url=args.url,
+        url=start_url,
         backup=not args.no_backup,
+        keep_open_sec=float(getattr(args, "keep_open", 0) or 0),
+        debug=bool(getattr(args, "debug", False)),
+        reuse_session=reuse,
+        follow_appleid=follow_appleid,
+        appleid_url=settings.appleid_origin + "/",
     )
     try:
         result = capture_icloud_cookie(
@@ -499,9 +559,14 @@ def cmd_cookie_login(args: argparse.Namespace) -> int:
         print(f"失败: {e}")
         return 1
 
+    if result.debug_dir:
+        print(f"debug dumps: {result.debug_dir}  pages={result.debug_pages}")
+
     if result.ok:
+        get_db().clear_cookie_invalid(account.name)
         print(f"OK stage={result.stage} keys={len(result.keys)} {result.message}")
         print(f"  wrote: {result.account_path}")
+        print("  cookie_invalid 标记已清除")
         return 0
 
     print(f"失败 stage={result.stage}: {result.message}")
@@ -515,6 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub = p.add_subparsers(dest="command", required=True)
 
     p_acc = sub.add_parser("accounts", help="列出本地账户与 cookie 完整性")
+    add_region_arguments(p_acc)
     p_acc.set_defaults(func=cmd_accounts)
 
     p_cf = sub.add_parser("camoufox-fetch", help="下载 Camoufox 到项目 browsers/camoufox")
@@ -540,10 +606,34 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="写回前不生成 .bak",
     )
+    p_cl.add_argument(
+        "--keep-open",
+        type=int,
+        default=0,
+        metavar="SEC",
+        help="Cookie 采集成功后浏览器再开 SEC 秒再关，默认 0 立即关",
+    )
+    p_cl.add_argument(
+        "--debug",
+        action="store_true",
+        help="采集每个新页面的 URL / 标题 / HTML / 可见文本到 logs/page-debug-...",
+    )
+    p_cl.add_argument(
+        "--appleid",
+        action="store_true",
+        help="先在 iCloud 登录，cookie 齐后再打开 /settings/（Apple 账户信息所在页）",
+    )
+    p_cl.add_argument(
+        "--no-reuse-session",
+        action="store_true",
+        help="不从 db/cookie/ 注入上次会话（默认会注入并写回）",
+    )
+    add_region_arguments(p_cl)
     p_cl.set_defaults(func=cmd_cookie_login)
 
     p_list = sub.add_parser("list", help="列出 HME 别名并同步到 db")
     p_list.add_argument("-a", "--account", help="账户备注名")
+    add_region_arguments(p_list)
     p_list.set_defaults(func=cmd_list)
 
     p_db = sub.add_parser("db", help="查看本地 db 中的别名记录")
@@ -556,7 +646,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_cdk.add_argument("-a", "--account", help="--list-map 时按母号过滤")
     p_cdk.set_defaults(func=cmd_cdk)
 
-    p_gen = sub.add_parser("generate", help="生成并保留一个 HME 别名（受1小时5个限制）")
+    p_gen = sub.add_parser("generate", help="生成并保留一个 HME 别名（1小时5个，间隔13-15分钟）")
     p_gen.add_argument("-a", "--account", help="账户备注名")
     p_gen.add_argument(
         "-l",
@@ -570,20 +660,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="默认 cdk 标签的 sha256 hex 长度，8-64，默认 64",
     )
     p_gen.add_argument("-n", "--note", default="由 2608B_iCloud 生成", help="备注")
+    add_region_arguments(p_gen)
     p_gen.set_defaults(func=cmd_generate)
 
-    p_quota = sub.add_parser("quota", help="查看 HME 创建配额（1小时5个）")
+    p_quota = sub.add_parser("quota", help="查看 HME 创建配额（1小时5个 + 13-15分钟间隔）")
     p_quota.add_argument("-a", "--account", help="账户/邮箱")
     p_quota.set_defaults(func=cmd_quota)
 
     p_on = sub.add_parser("on", help="恢复别名转发")
     p_on.add_argument("anonymous_id", help="anonymousId")
     p_on.add_argument("-a", "--account", help="账户备注名")
+    add_region_arguments(p_on)
     p_on.set_defaults(func=cmd_toggle, action="on")
 
     p_off = sub.add_parser("off", help="停用别名转发")
     p_off.add_argument("anonymous_id", help="anonymousId")
     p_off.add_argument("-a", "--account", help="账户备注名")
+    add_region_arguments(p_off)
     p_off.set_defaults(func=cmd_toggle, action="off")
 
     p_probe = sub.add_parser("mail-probe", help="测试 IMAP/SMTP 能否登录")
@@ -632,6 +725,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_web.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
     p_web.add_argument("--port", type=int, default=8770, help="端口，默认 8770")
     p_web.add_argument("--log-level", default="info", help="uvicorn 日志级别")
+    add_region_arguments(p_web)
     p_web.set_defaults(func=cmd_web)
 
     return p

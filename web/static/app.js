@@ -71,18 +71,7 @@ async function copyText(value, label) {
 }
 
 function fmtTime(iso) {
-  if (!iso) return "";
-  const d = new Date(iso.includes("T") ? iso : iso.replace(" ", "T") + "Z");
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 16);
-  const now = new Date();
-  const diffMin = Math.floor((now - d) / 60000);
-  if (diffMin < 1) return "刚刚";
-  if (diffMin < 60) return `${diffMin} 分钟前`;
-  if (diffMin < 1440) return `${Math.floor(diffMin / 60)} 小时前`;
-  const sameYear = d.getFullYear() === now.getFullYear();
-  const pad = (n) => String(n).padStart(2, "0");
-  const md = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  return sameYear ? md : `${d.getFullYear()}-${md}`;
+  return window.UiSettings.formatServerTime(iso, { relative: true });
 }
 
 function fmtSize(bytes) {
@@ -185,6 +174,9 @@ function renderGlobalStats() {
     const codes = state.stats.by_type.code || 0;
     chips.push(`<span class="chip">验证码 <b>${codes}</b></span>`);
     chips.push(`<span class="chip">1h 配额 <b>${acc.quota_used}/${acc.quota_limit}</b></span>`);
+    if (acc.next_produce_at) {
+      chips.push(`<span class="chip">下次可生产 <b>${acc.quota_retry_after_sec > 0 ? `${Math.ceil(acc.quota_retry_after_sec / 60)} 分钟后` : "现在"}</b></span>`);
+    }
   }
   document.getElementById("globalStats").innerHTML = chips.join("");
 }
@@ -205,6 +197,7 @@ function renderAccounts() {
     // 收件端点未必等于母号地址（可能配了 163），如实显示避免误解
     const inboxDiffers = a.inbox_mail && a.inbox_mail !== a.mail;
     const quotaCls = a.quota_remaining <= 0 ? "mini mini-warn" : "mini";
+    const waitMin = a.quota_retry_after_sec > 0 ? Math.ceil(a.quota_retry_after_sec / 60) : 0;
     return `
       <div class="acct-card${a.name === state.account ? " active" : ""}" data-account="${escapeHtml(a.name)}">
         <div class="acct-top">
@@ -219,9 +212,9 @@ function renderAccounts() {
         <div class="acct-nums">
           <span class="mini">隐私 <b>${a.alias_count}</b></span>
           <span class="mini">邮件 <b>${a.mail_count}</b></span>
-          <span class="${quotaCls}">1h <b>${a.quota_used}/${a.quota_limit}</b></span>
+          <span class="${quotaCls}">1h <b>${a.quota_used}/${a.quota_limit}</b>${waitMin ? ` · ${waitMin}m` : ""}</span>
         </div>
-        ${!a.hme_ok ? `<div class="warn-text">cookie 不完整，隐私邮箱管理不可用（收信不受影响）；请运行 cookie-login</div>` : ""}
+        ${a.cookie_invalid || !a.hme_ok ? `<div class="warn-text">Cookie 已失效（${escapeHtml(a.cookie_invalid_reason || "cookie_invalid")}），已移出生产线；请运行 cookie-login</div>` : ""}
         ${!a.mail_ready ? `<div class="warn-text">收件凭证不全，无法收信</div>` : ""}
       </div>`;
   }).join("");
@@ -503,7 +496,7 @@ function renderDetail() {
     ["收件隐私邮箱", m.alias_hme || m.delivered_to || m.to_addr || "-"],
     ["分类", m.mail_type],
     ["验证码", m.code || "-"],
-    ["时间", m.date_header || m.date_utc || "-"],
+    ["时间", window.UiSettings.formatServerTime(m.date_utc, { withSeconds: true, withYear: true }) || m.date_header || "-"],
     ["目录/UID", `${mailboxText(m)} / ${m.uid}`],
     ["大小", m.size ? fmtSize(m.size) : "-"],
   ];
@@ -643,6 +636,15 @@ function debounce(fn, ms) {
 }
 
 function bindEvents() {
+  window.UiSettings.bind();
+  window.addEventListener(window.UiSettings.eventName, () => {
+    renderGlobalStats();
+    renderAccounts();
+    renderPool();
+    renderMailSections();
+    if (state.detail) renderDetail();
+  });
+
   document.getElementById("accountSelect").addEventListener("change", (ev) => {
     state.account = ev.target.value;
     state.aliasFilter = "";

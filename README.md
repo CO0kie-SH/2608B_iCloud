@@ -6,9 +6,26 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.8.13** |
+| **版本** | **26.8.15** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
-| **最后更新** | 2026-08-13 |
+| **最后更新** | 2026-08-15 |
+
+---
+
+## 版本 26.8.15 变更摘要
+
+| 模块 | 变更 |
+|------|------|
+| 生产间隔 | 老接口除每小时 5 个外，成功后再随机冷却 13–15 分钟；`produce_at` / `next_produce_at` 以 unix 时间入库存 |
+| curl 客户端 | `produce.bat` / `produce.sh` 只打 HTTP；`--forever` 无限跑；撞配额按 `retry_after` 睡 |
+| Cookie 失效标 | 421 / 缺 cookie 写入 `account_flags`；再生产立刻 `409 COOKIE_INVALID`；`--all` 跳过；`cookie-login` 成功摘标 |
+| 区域 | `--region cn` / `--suffix cn` → `icloud.com.cn`；先登录 iCloud 再进 `/settings/` |
+| cookie-login | `--debug` 按页面内容变化落盘；`--keep-open` 挂窗；`--appleid` 登录后再打开设置页 |
+| 会话复用 | 实验性质：`db/cookie/<账户>.json` 保存并在下次注入浏览器会话 |
+| Web 设置 | 顶栏设置框，仅前端时区偏移，默认 UTC+8 |
+| 新增账户 | README 补充 003 接入步骤 |
+
+**升级注意：** 首次启动会给 `create_events` 补 unix 时间列，并建 `account_flags`。旧 YAML 仍可用。中国区号生产时 Web/CLI 需 `--region cn`，或先把 cookie 收成 `X-APPLE-*` 再打国际站 setup。
 
 ---
 
@@ -32,17 +49,19 @@
 
 ## 硬性规矩（必须遵守）
 
-> ### 每个账户，滚动 1 小时内，最多创建 5 个隐私邮箱（HME）
+> ### 每个账户，滚动 1 小时内最多 5 个；两次生产至少间隔 13–15 分钟
 
 | 项 | 规定 |
 |----|------|
 | 范围 | **按账户分别计数**（互不影响） |
 | 窗口 | **滚动 1 小时**（非自然整点） |
 | 上限 | **5 个 / 小时 / 账户** |
+| 间隔 | **`3600/5+1 = 13` 分钟起**，成功后随机落到 **[13, 15] 分钟** |
 | 实现 | `create_alias` 创建前通过 SQLite 事务原子占位；失败释放，成功记账 |
-| 记录 | 表 `create_events` 记录每次成功创建的本地 UTC 时间 |
+| 记录 | 表 `create_events`：`created_at` + unix `produce_at` / `next_produce_at` |
 | 并发 | Web 线程和多个浏览器客户端共用数据库配额，不按客户端分别计数 |
-| 常量 | `tools/rate_limit.py` → `HME_CREATE_LIMIT_PER_HOUR = 5` |
+| 常量 | `tools/rate_limit.py` → `HME_CREATE_LIMIT_PER_HOUR = 5`，`HME_CREATE_MIN/MAX_INTERVAL_MINUTES = 13/15` |
+| Cookie 失效 | HTTP 421 / 缺 cookie 会写入 `account_flags.cookie_invalid`；再生产立刻 `409 COOKIE_INVALID`，`--all` 跳过。`cookie-login` 成功后自动摘标 |
 
 **原因：** 短时间大量创建会触发 Apple 限流（如 `-41015`），严重时导致账户暂时不可用。**禁止绕过。**
 
@@ -67,7 +86,7 @@ python main.py quota -a user001@icloud.com
 | 生产 | 按账号控制数量和线程；任务进度与结果持久化 |
 | 多客户端 | 打开即同步；生产历史、配额和邮件状态以服务器 SQLite 为准 |
 | Cookie 采集 | Camoufox **有头**登录 iCloud → 写回 `apple.cookie`（2FA 在浏览器完成） |
-| CLI | `main.py` 子命令；`generate_alias.bat`；`start_web.bat` |
+| CLI | `main.py` 子命令；`generate_alias.bat`；`start_web.bat`；`cookie_login.bat`；`produce.bat` / `produce.sh` |
 
 ---
 
@@ -78,6 +97,8 @@ python main.py quota -a user001@icloud.com
 ├── main.py
 ├── generate_alias.bat
 ├── start_web.bat
+├── cookie_login.bat                # 有头登录 / debug / 会话复用
+├── produce.bat / produce.sh        # 独立 curl 生产客户端（不参与风控）
 ├── requirements.txt
 ├── .env / .env.example          # 本地密钥，勿提交
 ├── README.md
@@ -87,28 +108,31 @@ python main.py quota -a user001@icloud.com
 │   └── camoufox/                # Camoufox 二进制（gitignore，本机 fetch）
 ├── logs/                        # 采集过程日志（gitignore）
 ├── db/
-│   └── aliases.db               # 本地库（勿提交）
+│   ├── aliases.db               # 本地库（勿提交）
+│   └── cookie/                  # 实验性质浏览器会话（勿提交）
 ├── scripts/
-│   └── generate_alias.py
+│   ├── generate_alias.py
+│   └── produce_json.js          # produce.bat 用的 JSON 小助手
 ├── web/
 │   ├── __init__.py
 │   ├── app.py                  # FastAPI 应用
 │   ├── jobs.py                 # 收信/生产后台任务
 │   ├── routers/                # Web API
-│   ├── static/                 # 邮箱池与生产页前端
+│   ├── static/                 # 邮箱池、生产页、设置
 │   └── templates/              # HTML 页面
 └── tools/
-    ├── config.py                # .env → Settings
+    ├── config.py                # .env → Settings；区域 cn/us
     ├── cookies.py
     ├── accounts.py              # YAML 账户
     ├── logging_setup.py         # 控制台 + 文件日志
     ├── camoufox_runtime.py      # 项目内 browsers/camoufox
-    ├── cookie_capture.py        # 有头采 cookie + 写回
+    ├── cookie_capture.py        # 有头采 cookie + debug 落盘
+    ├── session_store.py         # db/cookie 会话保存/注入
     ├── client.py                # HME HTTP（Cookie）
     ├── hme.py                   # list / create_alias / on/off + CDK 标签
     ├── secure_random.py         # 跨平台安全随机
-    ├── db.py                    # SQLite：CDK / 配额 / 邮件 / 任务 / 客户端
-    ├── rate_limit.py            # 1h/5
+    ├── db.py                    # SQLite：CDK / 配额 / 任务 / 失效标
+    ├── rate_limit.py            # 1h/5 + 13–15 分钟间隔
     ├── mail.py                  # IMAP/SMTP + MIME/目录解析
     ├── mail_sync.py             # 增量收信入库
     └── production.py            # 多线程 HME 生产流水线
@@ -148,17 +172,47 @@ Cookie 过期（如 HTTP 421）时：
 ```bash
 python main.py cookie-login -a user001@icloud.com
 # 可选：--timeout 600  --url https://www.icloud.com/
+# 采完先不关浏览器，再挂 120 秒：
+python main.py cookie-login -a maohongwei003@icloud.com --keep-open 120
+# 打开 Apple 账户页，复用 db/cookie 会话，并继续扒页面 / App 专用密码：
+python main.py cookie-login -a maohongwei003@icloud.com --appleid --debug --keep-open 1200
+# 中国区：打开 www.icloud.com.cn
+python main.py cookie-login -a maohongwei003@icloud.com --region cn --debug --keep-open 1200
+# 等价写法：
+python main.py cookie-login -a maohongwei003@icloud.com --suffix cn
 ```
 
 1. 弹出 **有头** Camoufox 窗口，打开 iCloud。  
 2. **你在浏览器里**完成 Apple 登录。  
 3. 若出现手机验证码 / 双重认证：**在浏览器页面输入**，不要在终端输验证码。  
 4. 脚本轮询 Cookie；必填键齐全后写回账户 YAML（`apple.cookie` 或根级 `cookie`），并生成 `.bak`。  
-5. 过程写入 `logs/cookie-login-...log`（脱敏，不含完整 cookie / 验证码）。
+5. `--keep-open SEC`：写回成功后浏览器再开 SEC 秒，到点再关；默认 `0` 立刻关。  
+6. `--debug`：页面**内容一变**就落盘（同一 URL 的弹窗/iframe 也会再采），目录 `logs/page-debug-<账户>-<时间>/`。扫到 `xxxx-xxxx-xxxx-xxxx` 形态的 App 专用密码会写回 YAML 的 `apple.app_password`，给 IMAP 用。  
+7. `--appleid`：先在 iCloud 登录（`--region cn` → `https://www.icloud.com.cn/`），必填 cookie 齐后再打开设置页 `https://www.icloud.com.cn/settings/`（debug 里第一次看到 Apple 账户邮箱的页面）。没有 `appleid.apple.com.cn`。  
+8. 实验性质会话复用：浏览器 cookie 写入 `db/cookie/<账户>.json`，下次 `cookie-login` 自动注入；`--debug` 时每次变化再记一份 `db/cookie/<账户>/<时间>-<host>.json`。`--no-reuse-session` 可关掉。  
+7. 过程写入 `logs/cookie-login-...log`（脱敏，不含完整 cookie / 验证码）。
 
 ```bash
 python main.py accounts          # 确认 hme_ok=True
 ```
+
+### iCloud 区域 / 网址后缀
+
+默认 `.env` 的 `ICLOUD_DOMAIN=icloud.com`（国际站）。命令行可临时改后缀，**不改文件**：
+
+| 参数 | 例 | 打开的域名 |
+|------|----|------------|
+| `--region cn` | 中国区预选 | `icloud.com.cn` |
+| `--suffix cn` / `--suffix com.cn` | 改后缀 | `icloud.com.cn` |
+| `--region us` / `--suffix com` | 国际站 | `icloud.com` |
+
+```bat
+python main.py cookie-login -a maohongwei003@icloud.com --region cn --debug --keep-open 1200
+python main.py generate -a maohongwei003@icloud.com --region cn
+python main.py web --region cn
+```
+
+`cn` 和 `com.cn` 都落成 `icloud.com.cn`。收信 IMAP 仍按邮箱地址域名走（icloud.com / 163.com），不受这个开关影响。
 
 > 本期仅有头模式。无头 + 自动 2FA 后续再做；日志里的 `stage=2fa_challenge` 供后续自动化衔接。
 
@@ -231,6 +285,70 @@ cookie: "X-APPLE-...; ..."
 
 > 说明：`resolve_inbox()` 选中的 provider 会映射到对应主机（apple→iCloud，163mail→网易）。网易 IMAP 登录后会发 `ID` 命令，避免 Unsafe Login。
 
+### 新增账户（示例：003）
+
+现有号是 `maohongwei001` / `002` / `004`。加 **003** 不用改代码，丢一个 YAML 再采 cookie 即可。Web 会按文件 mtime 自动重载，**不必为加号重启服务**。
+
+**1. 复制模板**
+
+```bat
+copy accounts\_example.yaml.example accounts\maohongwei003@icloud.com.yaml
+```
+
+**2. 先写成最小可用稿**（cookie 先留空，下一步有头登录会写回去）
+
+```yaml
+mail: maohongwei003@icloud.com
+apple:
+  appleid: maohongwei003@icloud.com
+  app_password: xxxx-xxxx-xxxx-xxxx
+  cookie: ""
+```
+
+| 必填 | 填什么 |
+|------|--------|
+| 文件名 | 与 `mail` 一致：`accounts/maohongwei003@icloud.com.yaml` |
+| `mail` | 母号 / 账户名，生产、配额、打标都按这个认 |
+| `apple.appleid` | 真正用来登 iCloud 的 Apple ID，可以和 `mail` 不同 |
+| `apple.app_password` | [appleid.apple.com](https://appleid.apple.com) 生成的 App 专用密码；只要收信就填 |
+| `apple.cookie` | 先空着，`cookie-login` 会写回 |
+
+只要 HME、暂不收信：`app_password` 可以先不填。要 163 收信就再加 `163mail` / `inbox` 块，格式同上。
+
+**3. 有头采集 Cookie（含 2FA）**
+
+```bat
+python main.py cookie-login -a maohongwei003@icloud.com
+python main.py cookie-login -a maohongwei003@icloud.com --keep-open 180
+```
+
+弹出 Camoufox 后在浏览器里登录；验证码也在页面里输。必填 Cookie 齐了会写回 YAML，并清掉该号的 `COOKIE_INVALID` 标记。`--keep-open 180` 表示写回后再把窗口挂 180 秒，方便核对登录态。中国区加 `--region cn`（或 `--suffix cn` / `--suffix com.cn`），打开的是 `https://www.icloud.com.cn`。
+
+**4. 确认进池子**
+
+```bat
+python main.py accounts
+python main.py quota -a maohongwei003@icloud.com
+produce.bat --list
+```
+
+`hme_ok=True`、`cookie_invalid=false` 才能生产。然后：
+
+```bat
+produce.bat -a maohongwei003@icloud.com
+produce.bat --all --forever
+```
+
+`--all` 会带上 003。老规矩照旧：每号每小时 5 个，间隔 13–15 分钟。
+
+**5. Cookie 又 421 了**
+
+```bat
+python main.py cookie-login -a maohongwei003@icloud.com
+```
+
+失效号会被打标，再生产立刻 `409 COOKIE_INVALID`，`--all` 自动跳过。
+
 ---
 
 ## 启动 WebUI
@@ -257,8 +375,8 @@ start_web.bat 8771
 | 参数 | 当前规则 |
 |------|----------|
 | iCloud 账号 | 精确到单个账户，配额互相独立 |
-| 生产接口 | `legacy`：旧版接口（每小时5个） |
-| 生产数量 | 旧版接口单次 `1-5` |
+| 生产接口 | `legacy`：旧版接口（每小时5个，间隔13–15分钟） |
+| 生产数量 | 旧版接口单次只能 `1` 个；间隔未到时剩余为 0 |
 | 并发线程 | `1-5`；每个线程使用独立 Apple 会话 |
 
 页面打开后会调用 `POST /api/client-sync/open`：登记当前客户端、读取生产任务与配额快照，并自动提交一次全账户增量收信。多个客户端同时打开时，相同范围的运行中收信任务会去重。
@@ -281,6 +399,23 @@ start_web.bat 8771
 | `GET` | `/api/production/jobs` | 查询持久化生产历史 |
 | `GET` | `/api/production/jobs/{job_id}` | 查询一个生产任务 |
 | `POST` | `/api/client-sync/open` | 客户端打开同步快照与自动收信 |
+
+独立 curl 客户端（不参与风控，配额仍由 Python 服务执行）：
+
+```bat
+produce.bat --list
+produce.bat -a user001@icloud.com
+produce.bat --all --loop 30
+produce.bat --all --forever
+```
+
+```bash
+chmod +x produce.sh
+./produce.sh --list
+./produce.sh -a user001@icloud.com
+./produce.sh --all --loop 30
+./produce.sh --all --forever
+```
 
 提交一个旧版生产任务：
 

@@ -9,11 +9,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from tools.accounts import find_account, load_all_accounts
-from tools.client import ICloudError, ICloudHMEClient
+from tools.client import CookieInvalidError, ICloudError, ICloudHMEClient, is_cookie_failure
 from tools.config import load_settings
 from tools.db import AliasDB
 from tools.hme import HMEService
-from tools.rate_limit import HME_CREATE_LIMIT_PER_HOUR, HMECreateRateLimitError
+from tools.rate_limit import (
+    HME_CREATE_LIMIT_PER_HOUR,
+    HME_CREATE_MAX_INTERVAL_MINUTES,
+    HME_CREATE_MIN_INTERVAL_MINUTES,
+    HMECreateRateLimitError,
+)
 
 
 def main() -> int:
@@ -61,16 +66,21 @@ def main() -> int:
         print(f"ERROR: 多个账户，请指定 -a（可用: {names}）")
         return 1
 
-    if not acc.ok:
-        print(f"ERROR: cookie 可能不完整 -> {acc.summary()}")
-        return 1
-
     db = AliasDB(settings.base_dir / "db" / "aliases.db")
+    if db.is_cookie_invalid(acc.name):
+        print(f"ERROR: COOKIE_INVALID account={acc.name} 已标记失效，请先 cookie-login")
+        return 3
+    if not acc.ok:
+        db.mark_cookie_invalid(acc.name, reason="cookie_incomplete")
+        print(f"ERROR: cookie 可能不完整 -> {acc.summary()}")
+        return 3
     print(f"account={acc.name}")
     q0 = db.get_create_quota(acc.name)
     print(
         f"quota before: {q0.used}/{q0.limit} in 1h, remaining={q0.remaining} "
-        f"(rule: max {HME_CREATE_LIMIT_PER_HOUR}/hour)"
+        f"next={q0.next_produce_at} "
+        f"(rule: max {HME_CREATE_LIMIT_PER_HOUR}/hour, "
+        f"interval {HME_CREATE_MIN_INTERVAL_MINUTES}-{HME_CREATE_MAX_INTERVAL_MINUTES}min)"
     )
     print("generating HME alias via tools.hme.HMEService ...")
 
@@ -83,10 +93,17 @@ def main() -> int:
                 note=args.note,
                 cdk_hex_len=args.cdk_hex_len,
             )
+    except CookieInvalidError as e:
+        print(f"ERROR: {e}")
+        return 3
     except HMECreateRateLimitError as e:
-        print(f"ERROR: 拒绝创建（规矩：1小时最多{HME_CREATE_LIMIT_PER_HOUR}个）: {e}")
+        print(f"ERROR: 拒绝创建（1小时最多{HME_CREATE_LIMIT_PER_HOUR}个 / 间隔{HME_CREATE_MIN_INTERVAL_MINUTES}分钟）: {e}")
         return 2
     except (ICloudError, RuntimeError, ValueError) as e:
+        if is_cookie_failure(e):
+            db.mark_cookie_invalid(acc.name, reason="http_421")
+            print(f"ERROR: COOKIE_INVALID: {e}")
+            return 3
         print(f"ERROR: 生成失败: {e}")
         return 1
 
@@ -96,7 +113,10 @@ def main() -> int:
     print(f"label={alias.label}")
     print(f"id={alias.anonymous_id}")
     print(f"active={alias.is_active}")
-    print(f"quota after: {q1.used}/{q1.limit} remaining={q1.remaining}")
+    print(
+        f"quota after: {q1.used}/{q1.limit} remaining={q1.remaining} "
+        f"produce_at={q1.last_produce_at} next_produce_at={q1.next_produce_at}"
+    )
     print(f"db={db.db_path}")
     return 0
 

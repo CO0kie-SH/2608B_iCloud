@@ -18,20 +18,32 @@ def production_options() -> dict[str, Any]:
     accounts = []
     for acc in get_accounts():
         quota = db.get_create_quota(acc.name)
+        flag = db.get_account_flag(acc.name) or {}
+        cookie_invalid = bool(flag.get("cookie_invalid")) or not bool(acc.ok)
         accounts.append(
             {
                 "name": acc.name,
                 "mail": acc.mail,
-                "hme_ok": bool(acc.ok),
+                "hme_ok": bool(acc.ok) and not cookie_invalid,
+                "cookie_invalid": cookie_invalid,
+                "cookie_invalid_reason": flag.get("reason") or ("cookie_incomplete" if not acc.ok else ""),
                 "quota_used": quota.used,
                 "quota_limit": quota.limit,
                 "quota_remaining": quota.remaining,
                 "quota_retry_after_sec": quota.retry_after_sec,
+                "last_produce_at": quota.last_produce_at,
+                "next_produce_at": quota.next_produce_at,
             }
         )
     return {
         "interfaces": [
-            {"id": "legacy", "label": "旧版接口（每小时5个）", "limit": 5}
+            {
+                "id": "legacy",
+                "label": "旧版接口（每小时5个，间隔13–15分钟）",
+                "limit": 5,
+                "min_interval_sec": 13 * 60,
+                "max_interval_sec": 15 * 60,
+            }
         ],
         "accounts": accounts,
         "sync_at": utc_now(),
@@ -45,17 +57,18 @@ def start_production(
     account: str | None = Query(default=None),
 ) -> dict[str, Any]:
     acc = resolve_account(account or payload.get("account"))
+    db = get_db()
+    db.assert_cookie_ready(acc.name)
     interface = str(payload.get("interface") or "legacy")
     if interface != "legacy":
         raise HTTPException(status_code=400, detail="未知生产接口")
     count = int(payload.get("count") or 1)
     threads = int(payload.get("threads") or 1)
-    if count < 1 or count > 5:
-        raise HTTPException(status_code=400, detail="旧版接口单次最多生产 5 个")
+    if count < 1 or count > 1:
+        raise HTTPException(status_code=400, detail="旧版接口受 13–15 分钟间隔限制，单次只能生产 1 个")
     if threads < 1 or threads > 5:
         raise HTTPException(status_code=400, detail="并发线程范围为 1-5")
     settings = get_settings()
-    db = get_db()
 
     def runner(on_progress):
         return produce_aliases(

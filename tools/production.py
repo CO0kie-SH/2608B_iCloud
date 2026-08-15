@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
-from .client import ICloudHMEClient
+from .client import CookieInvalidError, ICloudError, ICloudHMEClient, is_cookie_failure
 from .db import AliasDB, utc_now
 from .hme import HMEService
 
@@ -33,8 +33,11 @@ def produce_aliases(
     """按单个 iCloud 账号逐个生产，配额由 SQLite 原子占位保证。"""
     count = max(1, min(int(count), 20))
     threads = max(1, min(int(threads), 5, count))
+    account_name = getattr(account, "name", "?")
+    db.assert_cookie_ready(account_name)
     if not getattr(account, "ok", False):
-        raise ValueError(f"[{getattr(account, 'name', '?')}] cookie 不完整或已失效")
+        db.mark_cookie_invalid(account_name, reason="cookie_incomplete")
+        raise CookieInvalidError(account_name, reason="cookie_incomplete")
     items: list[dict[str, Any]] = []
     errors: list[str] = []
     def create_one(index: int) -> dict[str, Any]:
@@ -42,7 +45,13 @@ def produce_aliases(
             service = HMEService(client, db=db)
             if callable(on_progress):
                 on_progress(f"{account.name}：开始生产 {index + 1}/{count}")
-            alias = service.create_alias(account=account.name, note=note, db=db)
+            try:
+                alias = service.create_alias(account=account.name, note=note, db=db)
+            except (ICloudError, RuntimeError) as exc:
+                if is_cookie_failure(exc):
+                    db.mark_cookie_invalid(account_name, reason="http_421")
+                    raise CookieInvalidError(account_name, reason="http_421") from exc
+                raise
             if callable(on_progress):
                 on_progress(f"{account.name}：已生产 {alias.hme} ({index + 1}/{count})")
             return {

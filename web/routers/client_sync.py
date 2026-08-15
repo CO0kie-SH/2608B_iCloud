@@ -37,11 +37,16 @@ def client_open(
     quotas = {}
     for account in accounts:
         quota = db.get_create_quota(account.name)
+        flag = db.get_account_flag(account.name) or {}
         quotas[account.name] = {
             "used": quota.used,
             "limit": quota.limit,
             "remaining": quota.remaining,
             "retry_after_sec": quota.retry_after_sec,
+            "last_produce_at": quota.last_produce_at,
+            "next_produce_at": quota.next_produce_at,
+            "cookie_invalid": bool(flag.get("cookie_invalid")) or not bool(account.ok),
+            "cookie_invalid_reason": flag.get("reason") or "",
         }
     return {
         "client_id": client_id,

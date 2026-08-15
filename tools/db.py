@@ -12,8 +12,11 @@ from typing import Any, Iterator
 
 from .rate_limit import (
     HME_CREATE_LIMIT_PER_HOUR,
+    HME_CREATE_MAX_INTERVAL_SECONDS,
+    HME_CREATE_MIN_INTERVAL_SECONDS,
     HME_CREATE_WINDOW_SECONDS,
     HMECreateRateLimitError,
+    pick_create_interval_seconds,
 )
 
 # CDK_ + 8~64 hex
@@ -26,6 +29,19 @@ def utc_now() -> str:
 
 def utc_now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def unix_now() -> int:
+    return int(datetime.now(timezone.utc).timestamp())
+
+
+def to_unix(ts: str | int | float | None) -> int:
+    if ts is None or ts == "":
+        return 0
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    parsed = parse_utc(str(ts))
+    return int(parsed.timestamp()) if parsed else 0
 
 
 def parse_utc(ts: str) -> datetime | None:
@@ -175,7 +191,11 @@ class CreateQuota:
     window_seconds: int
     remaining: int
     retry_after_sec: int
-    recent: list[dict[str, str]]
+    recent: list[dict[str, Any]]
+    last_produce_at: int = 0
+    next_produce_at: int = 0
+    interval_min_sec: int = HME_CREATE_MIN_INTERVAL_SECONDS
+    interval_max_sec: int = HME_CREATE_MAX_INTERVAL_SECONDS
 
     @property
     def allowed(self) -> bool:
@@ -339,7 +359,9 @@ class AliasDB:
                     hme TEXT NOT NULL DEFAULT '',
                     cdk TEXT NOT NULL DEFAULT '',
                     label TEXT NOT NULL DEFAULT '',
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    produce_at INTEGER NOT NULL DEFAULT 0,
+                    next_produce_at INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -385,6 +407,18 @@ class AliasDB:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS account_flags (
+                    account TEXT PRIMARY KEY,
+                    cookie_invalid INTEGER NOT NULL DEFAULT 0,
+                    reason TEXT NOT NULL DEFAULT '',
+                    marked_at INTEGER NOT NULL DEFAULT 0,
+                    cleared_at INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
             ev_cols = self._table_columns(conn, "create_events")
             if "cdk" not in ev_cols:
                 conn.execute(
@@ -394,6 +428,30 @@ class AliasDB:
                 conn.execute(
                     "ALTER TABLE create_events ADD COLUMN parent_mail TEXT NOT NULL DEFAULT ''"
                 )
+            if "produce_at" not in ev_cols:
+                conn.execute(
+                    "ALTER TABLE create_events ADD COLUMN produce_at INTEGER NOT NULL DEFAULT 0"
+                )
+            if "next_produce_at" not in ev_cols:
+                conn.execute(
+                    "ALTER TABLE create_events ADD COLUMN next_produce_at INTEGER NOT NULL DEFAULT 0"
+                )
+            # 旧行只有 created_at 文本时间：回填 unix，并把下次可生产时间垫到 13 分钟后
+            conn.execute(
+                """
+                UPDATE create_events
+                SET produce_at = CAST(strftime('%s', created_at) AS INTEGER)
+                WHERE produce_at = 0 AND created_at IS NOT NULL AND created_at != ''
+                """
+            )
+            conn.execute(
+                """
+                UPDATE create_events
+                SET next_produce_at = produce_at + ?
+                WHERE next_produce_at = 0 AND produce_at > 0
+                """,
+                (HME_CREATE_MIN_INTERVAL_SECONDS,),
+            )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_create_events_account_time "
                 "ON create_events(account, created_at)"
@@ -603,15 +661,20 @@ class AliasDB:
     ) -> str:
         """记录一次成功创建（用于 1 小时限流）。返回 created_at。"""
         now = utc_now()
+        produce_at = unix_now()
+        next_produce_at = produce_at + pick_create_interval_seconds()
         cdk_val = normalize_cdk(cdk) or extract_cdk_from_label(label)
         parent = (parent_mail or account or "").strip()
         with self._connect() as conn:
             conn.execute(
                 """
-                INSERT INTO create_events (account, parent_mail, hme, cdk, label, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO create_events (
+                    account, parent_mail, hme, cdk, label, created_at,
+                    produce_at, next_produce_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (account, parent, hme, cdk_val, label, now),
+                (account, parent, hme, cdk_val, label, now, produce_at, next_produce_at),
             )
             conn.commit()
         return now
@@ -628,20 +691,50 @@ class AliasDB:
         if not account:
             raise ValueError("account 不能为空")
         now = utc_now_dt()
+        now_unix = int(now.timestamp())
         since_s = (now - timedelta(seconds=window_seconds)).strftime("%Y-%m-%d %H:%M:%S")
         claim_id = uuid.uuid4().hex
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             conn.execute("DELETE FROM create_claims WHERE claimed_at < ?", (since_s,))
+            last = conn.execute(
+                """
+                SELECT produce_at, next_produce_at, created_at
+                FROM create_events
+                WHERE account = ?
+                ORDER BY COALESCE(NULLIF(produce_at, 0), CAST(strftime('%s', created_at) AS INTEGER)) DESC
+                LIMIT 1
+                """,
+                (account,),
+            ).fetchone()
             events = conn.execute(
                 "SELECT created_at FROM create_events WHERE account = ? AND created_at >= ? ORDER BY created_at ASC",
                 (account, since_s),
             ).fetchall()
             active = conn.execute(
-                "SELECT COUNT(*) AS n FROM create_claims WHERE account = ? AND claimed_at >= ?",
+                "SELECT claim_id, claimed_at FROM create_claims WHERE account = ? AND claimed_at >= ?",
                 (account, since_s),
-            ).fetchone()
-            used = len(events) + int(active["n"] if active else 0)
+            ).fetchall()
+            used = len(events) + len(active)
+            next_at = 0
+            if last:
+                next_at = int(last["next_produce_at"] or 0)
+                if next_at <= 0:
+                    last_at = int(last["produce_at"] or 0) or to_unix(last["created_at"])
+                    if last_at:
+                        next_at = last_at + HME_CREATE_MIN_INTERVAL_SECONDS
+            if active and next_at <= now_unix:
+                newest_claim = max(to_unix(row["claimed_at"]) for row in active)
+                next_at = max(next_at, newest_claim + HME_CREATE_MIN_INTERVAL_SECONDS)
+            if next_at > now_unix:
+                raise HMECreateRateLimitError(
+                    account,
+                    used,
+                    limit,
+                    next_at - now_unix,
+                    reason="interval",
+                    next_produce_at=next_at,
+                )
             if used >= int(limit):
                 retry_after = 0
                 if events:
@@ -672,18 +765,30 @@ class AliasDB:
         window_seconds: int = HME_CREATE_WINDOW_SECONDS,
     ) -> CreateQuota:
         now = utc_now_dt()
+        now_unix = int(now.timestamp())
         since = now - timedelta(seconds=window_seconds)
         since_s = since.strftime("%Y-%m-%d %H:%M:%S")
 
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT hme, label, cdk, created_at FROM create_events
+                SELECT hme, label, cdk, created_at, produce_at, next_produce_at
+                FROM create_events
                 WHERE account = ? AND created_at >= ?
                 ORDER BY created_at ASC
                 """,
                 (account, since_s),
             ).fetchall()
+            last = conn.execute(
+                """
+                SELECT produce_at, next_produce_at, created_at
+                FROM create_events
+                WHERE account = ?
+                ORDER BY COALESCE(NULLIF(produce_at, 0), CAST(strftime('%s', created_at) AS INTEGER)) DESC
+                LIMIT 1
+                """,
+                (account,),
+            ).fetchone()
             active_row = conn.execute(
                 "SELECT COUNT(*) AS n FROM create_claims WHERE account = ? AND claimed_at >= ?",
                 (account, since_s),
@@ -695,9 +800,18 @@ class AliasDB:
                 "label": r["label"],
                 "cdk": r["cdk"] if "cdk" in r.keys() else "",
                 "created_at": r["created_at"],
+                "produce_at": int(r["produce_at"] or 0) if "produce_at" in r.keys() else 0,
+                "next_produce_at": int(r["next_produce_at"] or 0) if "next_produce_at" in r.keys() else 0,
             }
             for r in rows
         ]
+        last_produce_at = 0
+        next_produce_at = 0
+        if last:
+            last_produce_at = int(last["produce_at"] or 0) or to_unix(last["created_at"])
+            next_produce_at = int(last["next_produce_at"] or 0)
+            if next_produce_at <= 0 and last_produce_at:
+                next_produce_at = last_produce_at + HME_CREATE_MIN_INTERVAL_SECONDS
         active_claims = int(active_row["n"] if active_row else 0)
         used = len(recent) + active_claims
         remaining = max(0, limit - used)
@@ -707,6 +821,9 @@ class AliasDB:
             if oldest:
                 unlock_at = oldest + timedelta(seconds=window_seconds)
                 retry_after = max(0, int((unlock_at - now).total_seconds()))
+        if next_produce_at > now_unix:
+            remaining = 0
+            retry_after = max(retry_after, next_produce_at - now_unix)
 
         return CreateQuota(
             account=account,
@@ -716,6 +833,8 @@ class AliasDB:
             remaining=remaining,
             retry_after_sec=retry_after,
             recent=recent,
+            last_produce_at=last_produce_at,
+            next_produce_at=next_produce_at,
         )
 
     # ---------- 生产任务 / 多客户端同步 ----------
@@ -777,6 +896,97 @@ class AliasDB:
             ).fetchall()
         return [self._production_job_dict(row) for row in rows]
 
+    def mark_cookie_invalid(self, account: str, reason: str = "http_421") -> dict[str, Any]:
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        now = utc_now()
+        now_unix = unix_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_flags (account, cookie_invalid, reason, marked_at, cleared_at, updated_at)
+                VALUES (?, 1, ?, ?, 0, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    cookie_invalid=1,
+                    reason=excluded.reason,
+                    marked_at=excluded.marked_at,
+                    updated_at=excluded.updated_at
+                """,
+                (account, (reason or "http_421")[:200], now_unix, now),
+            )
+            conn.commit()
+        return self.get_account_flag(account) or {
+            "account": account,
+            "cookie_invalid": True,
+            "reason": reason,
+            "marked_at": now_unix,
+            "cleared_at": 0,
+        }
+
+    def clear_cookie_invalid(self, account: str) -> dict[str, Any]:
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        now = utc_now()
+        now_unix = unix_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_flags (account, cookie_invalid, reason, marked_at, cleared_at, updated_at)
+                VALUES (?, 0, '', 0, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    cookie_invalid=0,
+                    reason='',
+                    cleared_at=excluded.cleared_at,
+                    updated_at=excluded.updated_at
+                """,
+                (account, now_unix, now),
+            )
+            conn.commit()
+        return self.get_account_flag(account) or {
+            "account": account,
+            "cookie_invalid": False,
+            "reason": "",
+            "marked_at": 0,
+            "cleared_at": now_unix,
+        }
+
+    def get_account_flag(self, account: str) -> dict[str, Any] | None:
+        account = (account or "").strip()
+        if not account:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT account, cookie_invalid, reason, marked_at, cleared_at, updated_at FROM account_flags WHERE account = ?",
+                (account,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "account": row["account"],
+            "cookie_invalid": bool(row["cookie_invalid"]),
+            "reason": row["reason"] or "",
+            "marked_at": int(row["marked_at"] or 0),
+            "cleared_at": int(row["cleared_at"] or 0),
+            "updated_at": row["updated_at"] or "",
+        }
+
+    def is_cookie_invalid(self, account: str) -> bool:
+        flag = self.get_account_flag(account)
+        return bool(flag and flag["cookie_invalid"])
+
+    def assert_cookie_ready(self, account: str) -> None:
+        from .client import CookieInvalidError
+
+        flag = self.get_account_flag(account)
+        if flag and flag["cookie_invalid"]:
+            raise CookieInvalidError(
+                account,
+                reason=flag.get("reason") or "cookie_invalid",
+                marked_at=int(flag.get("marked_at") or 0),
+            )
+
     def touch_client(self, client_id: str, user_agent: str = "") -> str:
         now = utc_now()
         with self._connect() as conn:
@@ -801,6 +1011,8 @@ class AliasDB:
                 used=q.used,
                 limit=q.limit,
                 retry_after_sec=q.retry_after_sec,
+                reason="interval" if q.next_produce_at > unix_now() else "hourly",
+                next_produce_at=q.next_produce_at,
             )
         return q
 
