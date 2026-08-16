@@ -10,7 +10,7 @@ from fastapi.templating import Jinja2Templates
 from web.deps import get_settings, web_dir
 from web.errors import register_error_handlers
 from web.production_loop import get_production_loop_controller
-from web.routers import accounts, aliases, client_sync, groups, mails, production, production_loop, sync
+from web.routers import accounts, aliases, client_sync, groups, mailcom, mails, production, production_loop, sync
 
 
 def create_app() -> FastAPI:
@@ -29,7 +29,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="2608B iCloud 邮箱池子",
         description="HME 隐私邮箱池 + 邮件收取与分类展示",
-        version="26.8.15",
+        version="26.8.16C",
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         lifespan=lifespan,
@@ -39,7 +39,7 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(base / "templates"))
 
     register_error_handlers(app)
-    for module in (accounts, aliases, client_sync, mails, production, production_loop, sync, groups):
+    for module in (accounts, aliases, client_sync, mailcom, mails, production, production_loop, sync, groups):
         app.include_router(module.router)
 
     @app.get("/", response_class=HTMLResponse)
@@ -55,6 +55,14 @@ def create_app() -> FastAPI:
         return templates.TemplateResponse(
             request=request,
             name="index.html",
+            context={"app_name": settings.app_name, "domain": settings.domain},
+        )
+
+    @app.get("/mailcom", response_class=HTMLResponse)
+    def mailcom_page(request: Request) -> HTMLResponse:
+        return templates.TemplateResponse(
+            request=request,
+            name="mailcom.html",
             context={"app_name": settings.app_name, "domain": settings.domain},
         )
 

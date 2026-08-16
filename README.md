@@ -6,13 +6,13 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.8.16** |
+| **版本** | **26.8.16C** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
 | **最后更新** | 2026-08-16 |
 
 ---
 
-## 版本 26.8.16 变更摘要
+## 版本 26.8.16C 变更摘要
 
 | 模块 | 变更 |
 |------|------|
@@ -21,8 +21,20 @@
 | 邮件详情 | 按 provider 自动选择 IMAP 或 Graph，Graph 邮件可按消息 ID 实时读取正文 |
 | SPF 信息 | 邮件表新增完整 `received_spf`，同时保留抽取后的 `envelope_from` |
 | 验证码导出 | `mail-export-codes` 输出 `sava/verification_codes.csv`；写前移除只读，原子写入后恢复只读 |
+| 收件别名 | 邮件 API、列表卡片和详情页新增 `recipient_alias`，展示按 provider 解析出的实际注册邮箱 |
+| 别名算法 | 163、Apple/iCloud、Outlook 三种 IMAP/Graph 收件算法已完成；QQ 算法留待后续样本 |
+| mail.com 收件 | 新增 `/mailcom` 页面与 `/api/mailcom/*` 接口；扫描 `accounts/mail.com*.txt` 的 `邮箱----密码` 凭证，支持多账号收件、分类、验证码、搜索、正文详情和 HTTP/SOCKS5 代理 |
 
 **升级注意：** 首次运行会给 `mails` 增加 `received_spf`，给 `mail_sync_state` 增加内部 Graph 游标字段；迁移自动执行。
+
+mail.com 凭证文件示例：
+
+```text
+user@example.com----APP_PASSWORD
+user2@example.com----APP_PASSWORD----http://127.0.0.1:7897
+```
+
+默认扫描 `accounts/mail.com*.txt`，也可通过 `MAILCOM_ACCOUNTS_FILE` 指定一个或多个文件。第三段代理为可选的账号级代理；省略时依次读取 `.env` 的 `MAILCOM_PROXY`、已有的 `CAMOUFOX_PROXY`、系统 `HTTPS_PROXY`，账号级代理优先。代理支持 `http://host:port`、带认证的 `http://user:password@host:port`、`socks5://host:port` 和 `socks5h://host:port`；`socks5h` 会让 DNS 解析也通过代理。mail.com 页面只返回账号地址和邮件内容，密码与代理凭证留在服务端。
 
 ---
 
@@ -396,6 +408,7 @@ start_web.bat 8771
 |------|------|------|
 | 首页 | `http://127.0.0.1:8770/` | 本地工作台入口；预留后续账号登录系统 |
 | 邮箱池 | `http://127.0.0.1:8770/mailbox` | 账户、隐私邮箱、分类邮件与正文详情 |
+| mail.com 收件 | `http://127.0.0.1:8770/mailcom` | mail.com 多账号、分类邮件、验证码与正文详情 |
 | 生产 | `http://127.0.0.1:8770/production` | 按 iCloud 账户生产 HME、查看配额和任务 |
 | 轮询生产 | `http://127.0.0.1:8770/production-loop` | 勾选账号后顺序循环生产，支持无限或定时运行 |
 | API 文档 | `http://127.0.0.1:8770/api/docs` | OpenAPI 交互文档 |
@@ -444,6 +457,9 @@ start_web.bat 8771
 | `POST` | `/api/production-loop/start` | 启动后端轮询线程 |
 | `POST` | `/api/production-loop/stop` | 当前任务结束后停止轮询 |
 | `POST` | `/api/client-sync/open` | 客户端打开同步快照与自动收信 |
+| `GET` | `/api/mailcom/accounts` | 列出 mail.com 账号地址（不返回密码） |
+| `GET` | `/api/mailcom/messages?account=...` | 读取指定 mail.com 账号的收件箱与分类 |
+| `GET` | `/api/mailcom/messages/{account}/{mail_id}` | 拉取 mail.com 单封邮件正文 |
 
 独立 curl 客户端（不参与风控，配额仍由 Python 服务执行）：
 
@@ -665,6 +681,7 @@ python main.py mail-send -a user001@icloud.com --to someone@example.com --subjec
 | `from_addr` / `sender_addr` | 展示发件地址 / 实际代发地址 |
 | `return_path_addr` | 信封退信地址（邮件投递失败时使用） |
 | `received_spf` / `envelope_from` | 完整 Received-SPF 头 / 从 SPF 或 Authentication-Results 抽取的信封发件地址 |
+| `recipient_alias` | Web 邮件接口与验证码 CSV 的解析收件别名；163 从 `envelope_from` VERP 提取，Apple/iCloud 与 Outlook 从 `return_path` VERP 提取 |
 
 ```python
 from tools.mail import get_mail_by_uid
@@ -760,7 +777,7 @@ D:\0Code2\py312\python.exe main.py mail-export-codes
 D:\0Code2\py312\python.exe main.py mail-export-codes -o sava\verification_codes.csv
 ```
 
-默认导出所有 `mail_type=code` 的记录，并包含 `code`、`summary`、地址、时间、`Received-SPF` 与 `envelope_from`。目标 CSV 写入前会移除只读属性，写入成功后设置为只读；Excel 持有文件锁时会自动短暂重试。
+默认导出所有 `mail_type=code` 的记录，并包含 `code`、`summary`、地址、时间、`Received-SPF`、`envelope_from` 与 `recipient_alias`。目标 CSV 写入前会移除只读属性，写入成功后设置为只读；Excel 持有文件锁时会自动短暂重试。
 
 ---
 
@@ -782,6 +799,8 @@ D:\0Code2\py312\python.exe main.py mail-export-codes -o sava\verification_codes.
 | `outlook_graph.py` | Outlook OAuth TXT 解析、Graph 正文读取与 delta 增量同步 |
 | `mail_sync.py` | IMAP UID / Graph 游标增量同步、分类与元数据入库 |
 | `mail_export.py` | 验证码 CSV 原子导出与只读属性管理 |
+| `mail_alias.py` | provider 分派式收件别名提取；163 使用 envelope VERP，Apple/Outlook 使用 return-path VERP |
+| `mailcom.py` | mail.com 登录、OAuth token、收件列表/正文读取与消息分类 |
 | `production.py` | 按账户多线程生产 HME |
 | `web/` | FastAPI WebUI、单次/轮询生产页、后台任务和多端同步 API |
 

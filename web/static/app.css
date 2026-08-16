@@ -339,6 +339,13 @@ select { max-width: 280px; }
 .mail-alias .hit { color: var(--accent); cursor: pointer; }
 .mail-alias .hit:hover { text-decoration: underline; }
 .mail-alias .miss { color: var(--fg-mute); }
+.mail-recipient-alias {
+  display: flex; gap: 7px; align-items: baseline;
+  margin-top: 3px; font-size: 11px; font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mail-recipient-alias .alias-caption { color: var(--fg-mute); flex: 0 0 auto; }
+.mail-recipient-alias .alias-value { color: var(--ok); overflow: hidden; text-overflow: ellipsis; }
 
 .mail-subject { font-size: 13px; margin-top: 6px; line-height: 1.45; }
 .mail-summary {

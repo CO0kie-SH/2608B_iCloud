@@ -91,6 +91,7 @@ class MailOut(BaseModel):
     mailbox_label: str = ""
     uid: str
     alias_hme: str
+    recipient_alias: str = ""
     from_name: str
     from_addr: str
     sender_addr: str
@@ -140,6 +141,53 @@ class MailDetailOut(BaseModel):
     fetch_error: str = ""
 
 
+class MailComAccountOut(BaseModel):
+    email: str
+    source: str = ""
+    ready: bool = True
+
+
+class MailComMessageOut(BaseModel):
+    id: str
+    account: str
+    subject: str
+    sender: str
+    from_name: str
+    from_addr: str
+    date_header: str = ""
+    date_utc: str = ""
+    timestamp: Any = None
+    mail_type: str = "other"
+    code: str = ""
+    summary: str = ""
+    body_text_len: int = 0
+    body_html_len: int = 0
+    has_body: bool = False
+
+
+class MailComListOut(BaseModel):
+    total: int
+    limit: int
+    items: list[MailComMessageOut]
+    by_type: dict[str, int] = {}
+    type_order: list[str] = list(MAIL_TYPE_ORDER)
+    type_labels: dict[str, str] = dict(MAIL_TYPE_LABELS)
+
+
+class MailComStatsOut(BaseModel):
+    total: int
+    by_type: dict[str, int]
+    type_order: list[str]
+    type_labels: dict[str, str]
+
+
+class MailComDetailOut(BaseModel):
+    meta: MailComMessageOut
+    body_text: str = ""
+    body_html: str = ""
+    fetch_error: str = ""
+
+
 class SyncJobOut(BaseModel):
     job_id: str
     status: str
@@ -184,7 +232,7 @@ def alias_to_out(
     )
 
 
-def mail_to_out(rec: Any) -> MailOut:
+def mail_to_out(rec: Any, *, recipient_alias: str = "") -> MailOut:
     d = rec.to_dict()
     return MailOut(
         id=d["id"],
@@ -193,6 +241,7 @@ def mail_to_out(rec: Any) -> MailOut:
         mailbox_label=mailbox_label(d["mailbox"]),
         uid=d["uid"],
         alias_hme=d["alias_hme"],
+        recipient_alias=recipient_alias,
         from_name=d["from_name"],
         from_addr=d["from_addr"],
         sender_addr=d["sender_addr"],

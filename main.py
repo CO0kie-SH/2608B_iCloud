@@ -475,13 +475,19 @@ def cmd_mail_sync(args: argparse.Namespace) -> int:
 def cmd_mail_export_codes(args: argparse.Namespace) -> int:
     """导出验证码邮件，写完将 CSV 设置为只读。"""
     from tools.mail_export import export_verification_codes_csv
+    from tools.mail_alias import MailAliasExtractor
 
     settings = load_settings()
     output = Path(args.output)
     if not output.is_absolute():
         output = settings.base_dir / output
     try:
-        path, count = export_verification_codes_csv(get_db(), output)
+        _, accounts = load_all_accounts(settings.accounts_files, settings.base_dir)
+        path, count = export_verification_codes_csv(
+            get_db(),
+            output,
+            alias_extractor=MailAliasExtractor(accounts),
+        )
     except Exception as exc:
         _safe_print(f"验证码 CSV 导出失败: {type(exc).__name__}: {exc}")
         return 1
@@ -810,7 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_export_codes.set_defaults(func=cmd_mail_export_codes)
 
-    p_web = sub.add_parser("web", help="启动 Web 界面（邮箱池子 + 收件展示）")
+    p_web = sub.add_parser("web", help="启动 Web 界面（邮箱池子 + mail.com 收件展示）")
     p_web.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")
     p_web.add_argument("--port", type=int, default=8770, help="端口，默认 8770")
     p_web.add_argument("--log-level", default="info", help="uvicorn 日志级别")

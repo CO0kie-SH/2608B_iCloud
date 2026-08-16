@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .db import AliasDB
+from .mail_alias import MailAliasExtractor
 
 
 VERIFICATION_CODE_FIELDS = (
@@ -28,6 +29,7 @@ VERIFICATION_CODE_FIELDS = (
     "to_addr",
     "delivered_to",
     "alias_hme",
+    "recipient_alias",
     "subject",
     "code",
     "summary",
@@ -81,6 +83,7 @@ def export_verification_codes_csv(
     db: AliasDB,
     output: str | Path,
     *,
+    alias_extractor: MailAliasExtractor | None = None,
     replace_retries: int = 6,
     retry_delay: float = 0.5,
 ) -> tuple[Path, int]:
@@ -88,6 +91,7 @@ def export_verification_codes_csv(
     target = unlock_file(output)
     temp_path: Path | None = None
     count = 0
+    extractor = alias_extractor or MailAliasExtractor()
     try:
         with tempfile.NamedTemporaryFile(
             mode="w",
@@ -103,6 +107,12 @@ def export_verification_codes_csv(
             writer.writeheader()
             for record in _verification_records(db):
                 row = record.to_dict()
+                source_mail = extractor.inbox_mail(row)
+                if source_mail:
+                    # CSV 的 parent_mail 面向收件筛选，展示实际 provider 邮箱；
+                    # 数据库中的 parent_mail 仍保留 HME 母号语义。
+                    row["parent_mail"] = source_mail
+                row["recipient_alias"] = extractor.extract_address(row)
                 writer.writerow({name: row.get(name, "") for name in VERIFICATION_CODE_FIELDS})
                 count += 1
             handle.flush()

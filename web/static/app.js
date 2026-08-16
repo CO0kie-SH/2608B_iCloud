@@ -342,6 +342,10 @@ function mailCard(m) {
     : (m.delivered_to || m.to_addr
         ? `<div class="mail-alias"><span class="arrow">→</span> <span class="miss">${escapeHtml(m.delivered_to || m.to_addr)}</span></div>`
         : "");
+  const parsedAliasLine = m.recipient_alias
+    ? `<div class="mail-recipient-alias"><span class="alias-caption">解析别名</span>
+         <span class="alias-value">${escapeHtml(m.recipient_alias)}</span></div>`
+    : "";
 
   const codeBox = (m.mail_type === "code" && m.code)
     ? `<div class="code-box">
@@ -370,6 +374,7 @@ function mailCard(m) {
       </div>
       ${relayDetail}
       ${aliasLine}
+      ${parsedAliasLine}
       <div class="mail-subject">${escapeHtml(m.subject || "(无主题)")}</div>
       ${m.summary && m.mail_type !== "code" ? `<div class="mail-summary">${escapeHtml(m.summary)}</div>` : ""}
       ${codeBox}
@@ -496,6 +501,7 @@ function renderDetail() {
     ["Return-Path", m.return_path || "-"],
     ["Envelope-From", m.envelope_from || "-"],
     ["收件隐私邮箱", m.alias_hme || m.delivered_to || m.to_addr || "-"],
+    ["解析别名", m.recipient_alias || "-"],
     ["分类", m.mail_type],
     ["验证码", m.code || "-"],
     ["时间", window.UiSettings.formatServerTime(m.date_utc, { withSeconds: true, withYear: true }) || m.date_header || "-"],

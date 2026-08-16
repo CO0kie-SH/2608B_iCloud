@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_name }} · mail.com 收件</title>
+<link rel="stylesheet" href="/static/app.css">
+<link rel="stylesheet" href="/static/mailcom.css">
+</head>
+<body>
+<header class="topbar topbar-mailbox">
+  <div class="brand">
+    <span class="logo">✉</span>
+    <div>
+      <div class="brand-name">{{ app_name }}</div>
+      <div class="brand-sub">mail.com 多账号收件</div>
+    </div>
+  </div>
+  <div class="topbar-mid">
+    <label class="field"><span class="field-label">mail.com 账号</span><select id="mailcomAccountSelect"></select></label>
+    <div id="mailcomStats" class="chips"></div>
+  </div>
+  <div class="topbar-actions">
+    <a class="btn btn-ghost nav-button" href="/">首页</a>
+    <a class="btn btn-ghost nav-button" href="/mailbox">邮箱池子</a>
+    <a class="btn btn-ghost nav-button" href="/production">生产</a>
+    <a class="btn btn-ghost nav-button" href="/production-loop">轮询生产</a>
+    <button id="mailcomRefresh" class="btn btn-primary" type="button">刷新收件</button>
+    <button id="btnSettings" class="btn btn-ghost" type="button" aria-expanded="false" title="界面设置">设置</button>
+  </div>
+</header>
+
+<div id="mailcomToast" class="toast hidden"></div>
+<main class="mailcom-layout">
+  <aside class="col mailcom-accounts-panel">
+    <div class="col-head"><h2>mail.com 账号</h2><span id="mailcomAccountCount" class="badge"></span></div>
+    <div id="mailcomAccounts" class="scroll-area"></div>
+  </aside>
+  <section class="col mailcom-messages-panel">
+    <div class="col-head">
+      <h2>收件箱</h2>
+      <div class="filter-info"><span id="mailcomFilterInfo" class="pill hidden"></span><input id="mailcomSearch" class="search" type="search" placeholder="搜索主题 / 发件人 / 验证码"></div>
+    </div>
+    <div id="mailcomContent" class="scroll-area"></div>
+  </section>
+</main>
+
+<div id="mailcomDrawerMask" class="drawer-mask hidden"></div>
+<aside id="mailcomDrawer" class="drawer hidden">
+  <div class="drawer-head"><div id="mailcomDrawerTitle" class="drawer-title">邮件详情</div><button id="mailcomDrawerClose" class="btn-icon" title="关闭">×</button></div>
+  <div id="mailcomDrawerBody" class="drawer-body"></div>
+</aside>
+
+<div id="settingsMask" class="settings-mask hidden"></div>
+<aside id="settingsPanel" class="settings-panel hidden" role="dialog" aria-labelledby="settingsTitle">
+  <div class="settings-head"><h2 id="settingsTitle">界面设置</h2><button id="settingsClose" class="btn-icon" type="button" title="关闭">×</button></div>
+  <div class="settings-body">
+    <label class="field-stack"><span class="field-label">显示时区</span><select id="settingsUtcOffset"></select></label>
+    <p class="settings-hint">只改网页时间显示。服务端和邮件时间保持原始值。</p>
+    <p class="settings-preview">当前显示：<b id="settingsTimePreview"></b></p>
+  </div>
+</aside>
+
+<script src="/static/settings.js"></script>
+<script src="/static/mailcom.js"></script>
+</body>
+</html>

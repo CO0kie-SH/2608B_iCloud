@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from web.deps import get_db, get_mail_client, resolve_account
+from web.deps import get_accounts, get_db, get_mail_client, resolve_account
 from tools.mail import MAILBOX_LABELS, MAILBOX_ORDER, mailbox_label, mailbox_role
+from tools.mail_alias import MailAliasExtractor
 from web.schemas import (
     MAIL_TYPE_LABELS,
     MAIL_TYPE_ORDER,
@@ -33,11 +34,12 @@ def list_mails(
     db = get_db()
     filters = dict(account=account, alias_hme=alias, mail_type=type, mailbox=mailbox, q=q)
     records = db.list_mails(limit=limit, offset=offset, **filters)
+    extractor = MailAliasExtractor(get_accounts())
     return MailListOut(
         total=db.count_mails(**filters),
         limit=limit,
         offset=offset,
-        items=[mail_to_out(r) for r in records],
+        items=[mail_to_out(r, recipient_alias=extractor.extract_address(r)) for r in records],
     )
 
 
@@ -87,8 +89,9 @@ def mail_detail(account: str, mailbox: str, uid: str) -> MailDetailOut:
     if not record:
         raise HTTPException(status_code=404, detail=f"邮件不存在: {account}/{mailbox}/{uid}")
 
-    meta = mail_to_out(record)
     acc = resolve_account(account)
+    extractor = MailAliasExtractor([acc])
+    meta = mail_to_out(record, recipient_alias=extractor.extract_address(record))
     try:
         client = get_mail_client(acc, timeout=DETAIL_TIMEOUT)
         data = client.get_by_uid(
@@ -135,6 +138,18 @@ def mail_detail(account: str, mailbox: str, uid: str) -> MailDetailOut:
             )
         except Exception:
             pass
+
+    # 详情页可能拿到比数据库更新的头字段，用实时值重新计算解析别名。
+    live_row = record.to_dict()
+    live_row.update(
+        {
+            "envelope_from": data.get("envelope_from") or live_row.get("envelope_from") or "",
+            "return_path": data.get("return_path_addr") or data.get("return_path") or live_row.get("return_path") or "",
+            "to_addr": data.get("to") or live_row.get("to_addr") or "",
+            "delivered_to": data.get("delivered_to") or live_row.get("delivered_to") or "",
+        }
+    )
+    meta.recipient_alias = extractor.extract_address(live_row)
 
     return MailDetailOut(
         meta=meta,
