@@ -11,7 +11,7 @@ from fastapi import HTTPException
 from tools.accounts import find_account, load_all_accounts, resolve_account_files
 from tools.config import Settings, load_settings
 from tools.db import AliasDB
-from tools.mail import ICloudMailClient, mail_client_from_account
+from tools.mail import mail_client_from_account
 from tools.mail_sync import MailSyncService, default_db_path
 
 
@@ -79,7 +79,7 @@ def resolve_account(name: str | None) -> Any:
     )
 
 
-def get_mail_client(account: Any, *, timeout: float = 30.0) -> ICloudMailClient:
+def get_mail_client(account: Any, *, timeout: float = 30.0) -> Any:
     try:
         return mail_client_from_account(account, timeout=timeout)
     except ValueError as e:

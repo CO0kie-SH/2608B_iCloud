@@ -215,7 +215,7 @@ function renderAccounts() {
           <span class="${quotaCls}">1h <b>${a.quota_used}/${a.quota_limit}</b>${waitMin ? ` · ${waitMin}m` : ""}</span>
         </div>
         ${a.cookie_invalid || !a.hme_ok ? `<div class="warn-text">Cookie 已失效（${escapeHtml(a.cookie_invalid_reason || "cookie_invalid")}），已移出生产线；请运行 cookie-login</div>` : ""}
-        ${!a.mail_ready ? `<div class="warn-text">收件凭证不全，无法收信</div>` : ""}
+        ${!a.mail_ready ? `<div class="warn-text">未配置此收件地址对应的 provider 密码</div>` : ""}
       </div>`;
   }).join("");
 
@@ -260,7 +260,8 @@ function aliasCard(a) {
       </div>
       <div class="alias-sub">
         <span class="alias-label" title="${escapeHtml(a.label || "")}">${escapeHtml(a.label || "(无标签)")}</span>
-        ${a.last_mail_at ? `<span>${escapeHtml(fmtTime(a.last_mail_at))}</span>` : ""}
+        ${a.created_at ? `<span class="alias-created" title="创建时间">${escapeHtml(fmtTime(a.created_at))}</span>` : ""}
+        ${a.last_mail_at ? `<span class="alias-mail-time" title="最近来信">${escapeHtml(fmtTime(a.last_mail_at))}</span>` : ""}
       </div>
     </div>`;
 }
@@ -493,6 +494,7 @@ function renderDetail() {
     ["发件人", `${m.from_name ? m.from_name + " " : ""}<${m.from_addr}>`],
     ["代发人", m.is_relayed ? `${m.sender_addr || m.return_path} (${m.relay_label})` : "（无，直接发送）"],
     ["Return-Path", m.return_path || "-"],
+    ["Envelope-From", m.envelope_from || "-"],
     ["收件隐私邮箱", m.alias_hme || m.delivered_to || m.to_addr || "-"],
     ["分类", m.mail_type],
     ["验证码", m.code || "-"],

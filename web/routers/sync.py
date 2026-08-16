@@ -37,7 +37,12 @@ def start_sync(
 
     def runner(on_progress):
         return service.sync_accounts(
-            targets, mailboxes=boxes, limit=limit, full=full, on_progress=on_progress
+            targets,
+            mailboxes=boxes,
+            limit=limit,
+            full=full,
+            skip_unready=all_accounts,
+            on_progress=on_progress,
         )
 
     job = submit_sync(account_label=label, runner=runner, deduplicate=True)

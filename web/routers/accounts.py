@@ -24,7 +24,7 @@ def _account_out(acc, db: AliasDB) -> AccountOut:
         providers=sorted(acc.providers.keys()),
         # 收件端点未必是母号的 iCloud 地址（可能配了 163），前端要显示真实来源
         inbox_provider=(inbox.name if inbox else ""),
-        inbox_mail=(inbox.mail if inbox else ""),
+        inbox_mail=(inbox.mail if inbox else (acc.inbox_mail or "")),
         alias_count=len(db.list_aliases(acc.name)),
         mail_count=db.count_mails(account=acc.name),
         quota_used=quota.used,

@@ -99,6 +99,43 @@ def mail_detail(account: str, mailbox: str, uid: str) -> MailDetailOut:
     except Exception as e:
         return MailDetailOut(meta=meta, fetch_error=f"{type(e).__name__}: {e}")
 
+    envelope = (data.get("envelope_from") or "").strip()
+    if envelope and envelope != (meta.envelope_from or ""):
+        meta.envelope_from = envelope
+        try:
+            db.upsert_mail(
+                account=record.account,
+                uid=record.uid,
+                mailbox=record.mailbox,
+                parent_mail=record.parent_mail,
+                message_id=record.message_id,
+                alias_hme=record.alias_hme,
+                from_name=record.from_name,
+                from_addr=record.from_addr,
+                sender_addr=record.sender_addr,
+                return_path=record.return_path,
+                received_spf=data.get("received_spf") or record.received_spf,
+                envelope_from=envelope,
+                is_relayed=bool(record.is_relayed),
+                relay_label=record.relay_label,
+                to_addr=record.to_addr,
+                delivered_to=record.delivered_to,
+                subject=record.subject,
+                mail_type=record.mail_type,
+                code=record.code,
+                summary=record.summary,
+                date_header=record.date_header,
+                date_utc=record.date_utc,
+                internaldate=record.internaldate,
+                size=record.size,
+                is_seen=bool(record.is_seen),
+                body_text_len=record.body_text_len,
+                body_html_len=record.body_html_len,
+                content_type=record.content_type,
+            )
+        except Exception:
+            pass
+
     return MailDetailOut(
         meta=meta,
         body_text=data.get("body_text") or "",

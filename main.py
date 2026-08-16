@@ -4,7 +4,12 @@ import argparse
 import sys
 from pathlib import Path
 
-from tools.accounts import find_account, load_all_accounts
+from tools.accounts import (
+    create_account_file,
+    find_account,
+    load_all_accounts,
+    parse_accounts_file,
+)
 from tools.camoufox_runtime import (
     CamoufoxRuntimeError,
     browser_status,
@@ -82,6 +87,37 @@ def _pick_account(name: str | None, args: argparse.Namespace | None = None):
 
     names = ", ".join(a.name for a in accounts)
     raise SystemExit(f"存在多个账户，请用 --account 指定（可用: {names}）")
+
+
+def _pick_or_create_cookie_account(
+    name: str | None,
+    args: argparse.Namespace,
+):
+    """cookie-login 指定新邮箱时，创建最小账户文件后继续采集。"""
+    if not name:
+        settings, account = _pick_account(None, args)
+        return settings, account, None
+
+    settings = apply_cli_domain(load_settings(), args)
+    _, accounts = load_all_accounts(settings.accounts_files, settings.base_dir)
+    account = find_account(accounts, name)
+    if account:
+        return settings, account, None
+
+    try:
+        path, created = create_account_file(
+            settings.accounts_files,
+            settings.base_dir,
+            name,
+            domain=settings.domain,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    parsed = parse_accounts_file(path)
+    if not parsed:
+        raise SystemExit(f"账户文件创建后加载失败: {path}")
+    return settings, parsed[0], path if created else None
 
 
 def cmd_list(args: argparse.Namespace) -> int:
@@ -263,13 +299,11 @@ def cmd_toggle(args: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
-def _mail_client(account) -> ICloudMailClient:
+def _mail_client(account):
     try:
         return mail_client_from_account(account)
     except ValueError as e:
-        raise SystemExit(
-            f"[{account.name}] 邮件凭证不完整，请检查 apple.app_password / 163mail.imap 与 inbox.mail ({e})"
-        ) from e
+        raise SystemExit(f"[{account.name}] 邮件凭证不完整，请检查收件 provider 与 inbox.mail ({e})") from e
 
 
 def cmd_mail_probe(args: argparse.Namespace) -> int:
@@ -438,6 +472,23 @@ def cmd_mail_sync(args: argparse.Namespace) -> int:
     return 1 if failed and total_saved == 0 and total_updated == 0 else 0
 
 
+def cmd_mail_export_codes(args: argparse.Namespace) -> int:
+    """导出验证码邮件，写完将 CSV 设置为只读。"""
+    from tools.mail_export import export_verification_codes_csv
+
+    settings = load_settings()
+    output = Path(args.output)
+    if not output.is_absolute():
+        output = settings.base_dir / output
+    try:
+        path, count = export_verification_codes_csv(get_db(), output)
+    except Exception as exc:
+        _safe_print(f"验证码 CSV 导出失败: {type(exc).__name__}: {exc}")
+        return 1
+    _safe_print(f"验证码 CSV 已导出: {path}  rows={count}  readonly=Y")
+    return 0
+
+
 def cmd_web(args: argparse.Namespace) -> int:
     """启动 Web 界面（邮箱池子 + 收件展示）。"""
     try:
@@ -505,7 +556,7 @@ def cmd_camoufox_path(_: argparse.Namespace) -> int:
 
 
 def cmd_cookie_login(args: argparse.Namespace) -> int:
-    settings, account = _pick_account(args.account, args)
+    settings, account, created_path = _pick_or_create_cookie_account(args.account, args)
     logger, log_path = setup_logger(
         "2608b.cookie_login",
         _log_dir(settings),
@@ -522,11 +573,17 @@ def cmd_cookie_login(args: argparse.Namespace) -> int:
     for h in logger.handlers:
         runtime_logger.addHandler(h)
 
+    if created_path:
+        print(f"已创建账户配置: {created_path}")
     print(f"account: {account.name}")
     print(f"file: {account.source}")
     print(f"log: {log_path}")
     print(f"region domain: {settings.domain}  origin: {settings.origin}")
-    print("模式: 有头浏览器 — 请在窗口内登录；2FA 验证码在浏览器里输入")
+    headless = bool(getattr(args, "headless", False))
+    if headless:
+        print("模式: 无头浏览器；复用 db/cookie/ 中的现有登录会话")
+    else:
+        print("模式: 有头浏览器；请在窗口内登录，2FA 验证码在浏览器里输入")
     print("等待必填 Cookie 齐全后自动写回 YAML…")
     if getattr(args, "keep_open", 0):
         print(f"采集成功后浏览器再挂 {int(args.keep_open)} 秒再关")
@@ -541,7 +598,7 @@ def cmd_cookie_login(args: argparse.Namespace) -> int:
         print(f"login: {settings.origin}/  登录成功后再打开 {settings.appleid_origin}/")
 
     opts = CookieCaptureOptions(
-        headless=False,
+        headless=headless,
         timeout_sec=float(args.timeout),
         url=start_url,
         backup=not args.no_backup,
@@ -550,6 +607,7 @@ def cmd_cookie_login(args: argparse.Namespace) -> int:
         reuse_session=reuse,
         follow_appleid=follow_appleid,
         appleid_url=settings.appleid_origin + "/",
+        capture_forward_to=not bool(getattr(args, "no_forward_to", False)),
     )
     try:
         result = capture_icloud_cookie(
@@ -566,6 +624,16 @@ def cmd_cookie_login(args: argparse.Namespace) -> int:
         get_db().clear_cookie_invalid(account.name)
         print(f"OK stage={result.stage} keys={len(result.keys)} {result.message}")
         print(f"  wrote: {result.account_path}")
+        if result.apple_id:
+            print(f"  Apple ID: {result.apple_id}")
+        if result.apple_id_error:
+            print(f"  Apple ID 回填警告: {result.apple_id_error}")
+        if result.forward_to:
+            print(f"  转发至: {result.forward_to}")
+            if result.forward_options:
+                print(f"  候选邮箱: {', '.join(result.forward_options)}")
+        if result.forward_error:
+            print(f"  转发邮箱采集警告: {result.forward_error}")
         print("  cookie_invalid 标记已清除")
         return 0
 
@@ -591,9 +659,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_cl = sub.add_parser(
         "cookie-login",
-        help="有头登录 iCloud，采集 Cookie 写回账户 YAML（2FA 在浏览器完成）",
+        help="登录或复用 iCloud 会话，采集 Cookie 和转发邮箱写回账户 YAML",
     )
-    p_cl.add_argument("-a", "--account", help="账户/邮箱")
+    p_cl.add_argument("-a", "--account", help="账户/邮箱；不存在时自动创建账户 YAML")
     p_cl.add_argument(
         "--timeout",
         type=int,
@@ -601,6 +669,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="等待登录超时秒数，默认 600",
     )
     p_cl.add_argument("--url", default=None, help="登录起始 URL，默认 https://www.<domain>/")
+    p_cl.add_argument(
+        "--headless",
+        action="store_true",
+        help="无头运行；默认复用 db/cookie/ 的既有登录会话",
+    )
     p_cl.add_argument(
         "--no-backup",
         action="store_true",
@@ -627,6 +700,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-reuse-session",
         action="store_true",
         help="不从 db/cookie/ 注入上次会话（默认会注入并写回）",
+    )
+    p_cl.add_argument(
+        "--no-forward-to",
+        action="store_true",
+        help="跳过隐藏邮件页面的转发邮箱读取与 inbox.mail 回填",
     )
     add_region_arguments(p_cl)
     p_cl.set_defaults(func=cmd_cookie_login)
@@ -720,6 +798,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_sync.add_argument("--full", action="store_true", help="忽略水位，全量重扫")
     p_sync.add_argument("-v", "--verbose", action="store_true", help="打印进度")
     p_sync.set_defaults(func=cmd_mail_sync)
+
+    p_export_codes = sub.add_parser(
+        "mail-export-codes", help="导出验证码邮件 CSV（写前解除只读，写后设为只读）"
+    )
+    p_export_codes.add_argument(
+        "-o",
+        "--output",
+        default="sava/verification_codes.csv",
+        help="输出路径，默认 sava/verification_codes.csv",
+    )
+    p_export_codes.set_defaults(func=cmd_mail_export_codes)
 
     p_web = sub.add_parser("web", help="启动 Web 界面（邮箱池子 + 收件展示）")
     p_web.add_argument("--host", default="127.0.0.1", help="监听地址，默认 127.0.0.1")

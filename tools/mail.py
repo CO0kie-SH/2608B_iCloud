@@ -394,6 +394,34 @@ class MailMessageParser:
         return cls.unmask_relay_addr(addr) or (addr or "").strip().lower()
 
     @classmethod
+    def envelope_from_addr(cls, msg: Message) -> str:
+        """从 Received-SPF / Authentication-Results 抽出 envelope-from。"""
+        blobs: list[str] = []
+        for name in ("Received-SPF", "Authentication-Results"):
+            for raw in msg.get_all(name) or []:
+                blobs.append(cls.decode_mime(raw))
+        text = " ".join(blobs)
+        if not text:
+            return ""
+        hit = re.search(
+            r"(?:envelope-from|smtp\.mail)\s*=\s*<?([^\s>;]+)>?",
+            text,
+            re.I,
+        )
+        if not hit:
+            return ""
+        return (hit.group(1) or "").strip().strip("<>").lower()
+
+    @classmethod
+    def received_spf_header(cls, msg: Message) -> str:
+        """保留完整 Received-SPF 值；多条头按原顺序换行拼接。"""
+        return "\n".join(
+            cls.decode_mime(raw).strip()
+            for raw in (msg.get_all("Received-SPF") or [])
+            if cls.decode_mime(raw).strip()
+        )
+
+    @classmethod
     def addr_list(cls, raw: str | None) -> list[dict[str, str]]:
         """多地址头 -> [{'name','addr'}]，按地址去重保序。"""
         if not raw:
@@ -669,6 +697,8 @@ class MailMessageParser:
         from_name_p, from_addr_raw = cls.addr_pair(msg.get("From"))
         sender_name_p, sender_addr_raw = cls.addr_pair(msg.get("Sender"))
         _, return_path_raw = cls.addr_pair(msg.get("Return-Path"))
+        envelope_from = cls.envelope_from_addr(msg)
+        received_spf = cls.received_spf_header(msg)
         to_addrs = cls.addr_list(msg.get("To"))
         delivered_to_addrs = cls.alias_candidates(msg, [])
         candidates = cls.alias_candidates(msg, to_addrs)
@@ -729,6 +759,8 @@ class MailMessageParser:
             "sender_name": sender_name_p,
             "sender_addr": sender_addr_p,
             "return_path_addr": return_path_p,
+            "received_spf": received_spf,
+            "envelope_from": envelope_from,
             "relay_addr": relay_addr if is_relayed else "",
             "is_relayed": is_relayed,
             "relay_label": relay_label,
@@ -1151,13 +1183,17 @@ def mail_client_from_endpoint(
     return ICloudMailClient(mail, password, timeout=timeout, provider=provider)
 
 
-def mail_client_from_account(account: Any, timeout: float = 30.0) -> ICloudMailClient:
+def mail_client_from_account(account: Any, timeout: float = 30.0) -> Any:
     """从 Account.resolve_inbox() 构建客户端。"""
     endpoint = account.resolve_inbox()
     if not endpoint or not endpoint.ready:
         raise ValueError(
             f"account mail credentials incomplete: {getattr(account, 'name', '?')}"
         )
+    if endpoint.name == "outlook":
+        from .outlook_graph import outlook_client_from_endpoint
+
+        return outlook_client_from_endpoint(endpoint, timeout=timeout)
     return ICloudMailClient(
         endpoint.mail,
         endpoint.password,
@@ -1195,7 +1231,7 @@ class MailService:
             raise ValueError(f"account mail credentials incomplete: {acc.name}")
         return acc
 
-    def get_client(self, mail: str) -> ICloudMailClient:
+    def get_client(self, mail: str) -> Any:
         acc = self._load_account(mail)
         return mail_client_from_account(acc)
 

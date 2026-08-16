@@ -26,7 +26,12 @@ def client_open(
         service = get_sync_service()
 
         def runner(on_progress):
-            return service.sync_accounts(accounts, limit=200, on_progress=on_progress)
+            return service.sync_accounts(
+                accounts,
+                limit=200,
+                skip_unready=True,
+                on_progress=on_progress,
+            )
 
         job = submit_sync(
             account_label=f"全部 {len(accounts)} 个账户",

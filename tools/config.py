@@ -142,6 +142,12 @@ def settings_with_domain(settings: Settings, domain: str) -> Settings:
     return replace(settings, domain=target)
 
 
+def settings_for_account(settings: Settings, account: object) -> Settings:
+    """应用账户级 iCloud 域名；未配置时继续使用全局设置。"""
+    domain = str(getattr(account, "icloud_domain", "") or "").strip()
+    return settings_with_domain(settings, domain) if domain else settings
+
+
 def apply_cli_domain(settings: Settings, args: object | None) -> Settings:
     if args is None:
         return settings

@@ -35,6 +35,8 @@ class SyncStats:
     last_uid: int = 0
     ok: bool = True
     error: str = ""
+    skipped: bool = False
+    note: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +50,8 @@ class SyncStats:
             "last_uid": self.last_uid,
             "ok": self.ok,
             "error": self.error,
+            "skipped": self.skipped,
+            "note": self.note,
         }
 
 
@@ -131,7 +135,14 @@ class MailSyncService:
         parent_mail = (getattr(account, "mail", "") or acc_name).strip()
 
         client = mail_client_from_account(account, timeout=self.timeout)
-        folders = resolve_sync_folders(client, mailboxes)
+        cursor_sync = bool(getattr(client, "supports_sync_cursor", False))
+        folders = (
+            [str(f).strip() for f in mailboxes if str(f).strip()]
+            if cursor_sync and mailboxes
+            else list(DEFAULT_SYNC_FOLDERS)
+            if cursor_sync
+            else resolve_sync_folders(client, mailboxes)
+        )
         alias_index = self._alias_index(acc_name, parent_mail)
 
         results: list[SyncStats] = []
@@ -142,14 +153,26 @@ class MailSyncService:
                 on_progress(f"{acc_name} / {box_label} 开始收取")
             try:
                 state = self.db.get_sync_state(acc_name, box)
-                since = 0 if full else int(state.get("last_uid") or 0)
-                items, max_uid = client.fetch_since_uid(
-                    mailbox=box,
-                    since_uid=since,
-                    limit=limit,
-                    include_body=True,
-                    body_limit=SYNC_BODY_LIMIT,
-                )
+                if cursor_sync:
+                    cursor = "" if full else str(state.get("sync_cursor") or "")
+                    items, next_cursor = client.fetch_since_cursor(
+                        mailbox=box,
+                        cursor=cursor,
+                        limit=limit,
+                        include_body=True,
+                        body_limit=SYNC_BODY_LIMIT,
+                    )
+                    max_uid = int(state.get("last_uid") or 0)
+                else:
+                    since = 0 if full else int(state.get("last_uid") or 0)
+                    items, max_uid = client.fetch_since_uid(
+                        mailbox=box,
+                        since_uid=since,
+                        limit=limit,
+                        include_body=True,
+                        body_limit=SYNC_BODY_LIMIT,
+                    )
+                    next_cursor = None
                 stats.fetched = len(items)
 
                 for item in items:
@@ -171,6 +194,8 @@ class MailSyncService:
                         from_addr=item.get("from_addr") or "",
                         sender_addr=item.get("sender_addr") or "",
                         return_path=item.get("return_path_addr") or "",
+                        received_spf=item.get("received_spf") or "",
+                        envelope_from=item.get("envelope_from") or "",
                         is_relayed=bool(item.get("is_relayed")),
                         relay_label=item.get("relay_label") or "",
                         to_addr=item.get("to") or "",
@@ -199,7 +224,12 @@ class MailSyncService:
 
                 stats.last_uid = max_uid
                 self.db.set_sync_state(
-                    acc_name, box, last_uid=max_uid, status="ok", saved_delta=stats.saved
+                    acc_name,
+                    box,
+                    last_uid=max_uid,
+                    sync_cursor=next_cursor,
+                    status="ok",
+                    saved_delta=stats.saved,
                 )
             except Exception as e:
                 stats.ok = False
@@ -230,6 +260,7 @@ class MailSyncService:
         mailboxes: Iterable[str] | None = None,
         limit: int = 200,
         full: bool = False,
+        skip_unready: bool = False,
         on_progress: Any = None,
     ) -> list[SyncStats]:
         """收取多个账户；某账户整体失败（如凭证不全）也不中断其余账户。"""
@@ -237,12 +268,22 @@ class MailSyncService:
         for acc in accounts:
             name = getattr(acc, "name", "") or "?"
             if not getattr(acc, "mail_ready", False):
+                inbox = (getattr(acc, "inbox_mail", "") or "").strip()
+                reason = (
+                    f"收件 provider 未配置：inbox={inbox}，需要对应邮箱服务商的收件授权"
+                    if inbox
+                    else "收件 provider 未配置：需要 app_password 或 inbox provider 配置"
+                )
+                if callable(on_progress):
+                    on_progress(f"{name} / 收件 {'跳过' if skip_unready else '失败'}：{reason}")
                 out.append(
                     SyncStats(
                         account=name,
                         mailbox="-",
-                        ok=False,
-                        error="收件凭证不全（需要 app_password / inbox 配置）",
+                        ok=bool(skip_unready),
+                        error="" if skip_unready else reason,
+                        skipped=bool(skip_unready),
+                        note=reason if skip_unready else "",
                     )
                 )
                 continue

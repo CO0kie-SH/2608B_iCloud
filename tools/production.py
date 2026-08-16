@@ -7,6 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from .client import CookieInvalidError, ICloudError, ICloudHMEClient, is_cookie_failure
+from .config import settings_for_account
 from .db import AliasDB, utc_now
 from .hme import HMEService
 
@@ -34,6 +35,7 @@ def produce_aliases(
     count = max(1, min(int(count), 20))
     threads = max(1, min(int(threads), 5, count))
     account_name = getattr(account, "name", "?")
+    db.reconcile_cookie_flag(account)
     db.assert_cookie_ready(account_name)
     if not getattr(account, "ok", False):
         db.mark_cookie_invalid(account_name, reason="cookie_incomplete")
@@ -41,7 +43,8 @@ def produce_aliases(
     items: list[dict[str, Any]] = []
     errors: list[str] = []
     def create_one(index: int) -> dict[str, Any]:
-        with ICloudHMEClient(settings, account.cookies) as client:
+        account_settings = settings_for_account(settings, account)
+        with ICloudHMEClient(account_settings, account.cookies) as client:
             service = HMEService(client, db=db)
             if callable(on_progress):
                 on_progress(f"{account.name}：开始生产 {index + 1}/{count}")

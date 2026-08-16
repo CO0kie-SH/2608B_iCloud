@@ -150,7 +150,8 @@ def submit_sync(
                 ):
                     job.status = "error"
                     job.error = "; ".join(
-                        f"{s.get('mailbox', '?')}: {s.get('error', '')}" for s in failed
+                        f"{s.get('account', '?')}/{s.get('mailbox', '?')}: {s.get('error', '')}"
+                        for s in failed
                     )
         except Exception as e:
             with _LOCK:

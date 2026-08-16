@@ -23,6 +23,14 @@ def parse_cookie_keys(cookies: str) -> list[str]:
     return re.findall(r"(?:^|;\s*)([A-Za-z0-9_.-]+)=", cookies)
 
 
+def normalize_cookie_value(value: object) -> str:
+    """规范 Cookie 值，兼容 YAML/浏览器导出时重复包裹的引号。"""
+    result = str(value or "").strip()
+    while len(result) >= 2 and result[0] == result[-1] and result[0] in "\"'":
+        result = result[1:-1]
+    return result
+
+
 def parse_cookie_header(cookies: str) -> dict[str, str]:
     """把 Cookie 请求头字符串解析为 dict。"""
     result: dict[str, str] = {}
@@ -35,15 +43,29 @@ def parse_cookie_header(cookies: str) -> dict[str, str]:
             continue
         key, value = part.split("=", 1)
         key = key.strip()
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        value = normalize_cookie_value(value)
         result[key] = value
     return result
 
 
 def cookie_header_from_dict(data: dict[str, str]) -> str:
-    return "; ".join(f"{k}={v}" for k, v in data.items())
+    return "; ".join(f"{k}={normalize_cookie_value(v)}" for k, v in data.items())
+
+
+def normalize_cookie_header(cookies: str) -> str:
+    """将任意 Cookie 请求头解析并重建为标准的无引号格式。"""
+    return cookie_header_from_dict(parse_cookie_header(cookies))
+
+
+def normalize_hme_cookie_header(cookies: str) -> str:
+    """仅保留 iCloud HME 接口需要的 Apple Web 会话 Cookie。"""
+    parsed = parse_cookie_header(cookies)
+    selected = {
+        key: value
+        for key, value in parsed.items()
+        if key.upper().startswith(("X-APPLE-", "X_APPLE_"))
+    }
+    return cookie_header_from_dict(selected)
 
 
 def missing_required_keys(cookies: str) -> list[str]:

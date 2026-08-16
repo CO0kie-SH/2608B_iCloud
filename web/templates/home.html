@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_name }} · 首页</title>
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">⌂</span><div><div class="brand-name">{{ app_name }}</div><div class="brand-sub">本地工作台</div></div></div>
+  <nav class="page-nav"><a class="active" href="/">首页</a><a href="/mailbox">邮箱池子</a><a href="/production">生产</a><a href="/production-loop">轮询生产</a></nav>
+</header>
+
+<main class="home-page">
+  <div class="home-inner">
+    <section class="home-intro">
+      <span class="home-kicker">本地工作台</span>
+      <h1>{{ app_name }}</h1>
+      <p>隐私邮箱生产、邮箱池与收件管理入口。</p>
+    </section>
+
+    <section class="home-notice" aria-labelledby="accountAccessTitle">
+      <div>
+        <h2 id="accountAccessTitle">账号登录系统</h2>
+        <span class="badge badge-soon">后续接入</span>
+      </div>
+      <p>当前使用本地工作台，后续将在主页接入账号登录与会话管理。</p>
+    </section>
+
+    <section class="home-workspace" aria-labelledby="workspaceTitle">
+      <div class="home-section-head">
+        <h2 id="workspaceTitle">工作台入口</h2>
+        <span class="badge">{{ domain }}</span>
+      </div>
+      <div class="home-link-list">
+        <a href="/mailbox"><span><b>邮箱池子</b><small>账户、隐私邮箱与分类邮件</small></span><strong>进入</strong></a>
+        <a href="/production"><span><b>生产</b><small>按单个 iCloud 账号提交生产任务</small></span><strong>进入</strong></a>
+        <a href="/production-loop"><span><b>轮询生产</b><small>按勾选账号顺序持续生产</small></span><strong>进入</strong></a>
+      </div>
+    </section>
+  </div>
+</main>
+</body>
+</html>

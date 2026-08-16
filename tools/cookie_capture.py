@@ -15,11 +15,13 @@ import yaml
 
 from .accounts import Account
 from .camoufox_runtime import CamoufoxRuntimeError, ensure_browser
+from .client import ICloudError, ICloudHMEClient
 from .config import Settings
 from .cookies import (
     REQUIRED_COOKIE_KEYS,
     cookie_header_from_dict,
     missing_required_keys,
+    normalize_hme_cookie_header,
     parse_cookie_keys,
 )
 from .logging_setup import cookie_keys_summary
@@ -48,9 +50,9 @@ STAGE_ERROR = "error"
 
 @dataclass
 class CookieCaptureOptions:
-    """有头采集选项；headless 预留给后续无头自动化。"""
+    """Cookie 与转发邮箱采集选项。"""
 
-    headless: bool = False  # 本期强制 False；True 时仅警告仍走有头
+    headless: bool = False
     timeout_sec: float = 600.0
     poll_interval_sec: float = 2.0
     url: str | None = None
@@ -66,6 +68,8 @@ class CookieCaptureOptions:
     reuse_session: bool = True
     follow_appleid: bool = False
     appleid_url: str = ""
+    capture_forward_to: bool = True
+    forward_timeout_sec: float = 60.0
 
 
 @dataclass
@@ -79,6 +83,11 @@ class CaptureResult:
     message: str = ""
     debug_dir: str = ""
     debug_pages: int = 0
+    apple_id: str = ""
+    apple_id_error: str = ""
+    forward_to: str = ""
+    forward_options: list[str] = field(default_factory=list)
+    forward_error: str = ""
 
 
 def _default_url(settings: Settings) -> str:
@@ -86,6 +95,7 @@ def _default_url(settings: Settings) -> str:
 
 
 APP_PASSWORD_RE = re.compile(r"\b([a-z]{4}-[a-z]{4}-[a-z]{4}-[a-z]{4})\b", re.I)
+FORWARD_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+")
 APP_PASSWORD_HINTS = (
     "专用密码",
     "app-specific",
@@ -174,6 +184,82 @@ def update_account_app_password(path: Path, password: str, *, backup: bool = Tru
     )
     path.write_text(dumped, encoding="utf-8", newline="\n")
     return where
+
+
+def update_account_apple_id(path: Path, apple_id: str, *, backup: bool = True) -> str:
+    """把 iCloud 校验响应中的主 Apple ID 写入 apple.appleid。"""
+    path = Path(path)
+    target = (apple_id or "").strip().lower()
+    if not FORWARD_EMAIL_RE.fullmatch(target):
+        raise ValueError(f"Apple ID 邮箱格式错误: {apple_id}")
+    if not path.exists():
+        raise FileNotFoundError(f"账户文件不存在: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"账户 YAML 根节点必须是映射: {path}")
+    if backup:
+        bak = path.with_suffix(path.suffix + ".bak")
+        bak.write_text(text, encoding="utf-8", newline="\n")
+
+    apple = data.get("apple")
+    if not isinstance(apple, dict):
+        apple = {}
+    else:
+        apple = dict(apple)
+    apple["appleid"] = target
+    data["apple"] = apple
+
+    dumped = yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+        width=10_000,
+    )
+    path.write_text(dumped, encoding="utf-8", newline="\n")
+    return "apple.appleid"
+
+
+def update_account_inbox(path: Path, mail: str, *, backup: bool = True) -> str:
+    """把隐藏邮件页面当前选中的转发邮箱写入 inbox.mail。"""
+    path = Path(path)
+    target = (mail or "").strip().lower()
+    if not FORWARD_EMAIL_RE.fullmatch(target):
+        raise ValueError(f"转发邮箱格式错误: {mail}")
+    if not path.exists():
+        raise FileNotFoundError(f"账户文件不存在: {path}")
+
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"账户 YAML 根节点必须是映射: {path}")
+    if backup:
+        bak = path.with_suffix(path.suffix + ".bak")
+        bak.write_text(text, encoding="utf-8", newline="\n")
+
+    inbox = data.get("inbox")
+    if not isinstance(inbox, dict):
+        inbox = {}
+    else:
+        inbox = dict(inbox)
+    inbox["mail"] = target
+    data["inbox"] = inbox
+
+    dumped = yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+        width=10_000,
+    )
+    path.write_text(dumped, encoding="utf-8", newline="\n")
+    return "inbox.mail"
 
 
 class PageDebugDumper:
@@ -324,22 +410,95 @@ class PageDebugDumper:
 def playwright_cookies_to_header(
     cookies: list[dict[str, Any]],
     *,
-    domain_hints: tuple[str, ...] = ("icloud", "apple", "mzstatic"),
+    request_host: str = "",
+    domain_hints: tuple[str, ...] = ("icloud",),
 ) -> str:
     """Playwright context.cookies() → Cookie 请求头字符串。"""
     picked: dict[str, str] = {}
+    host = request_host.strip().lower().lstrip(".")
     for c in cookies:
         name = str(c.get("name") or "").strip()
         value = c.get("value")
         if not name or value is None:
             continue
-        domain = str(c.get("domain") or "").lower()
-        if domain_hints and not any(h in domain for h in domain_hints):
-            # 仍保留 X-APPLE-* 名（有时 domain 怪异）
-            if not name.upper().startswith("X-APPLE") and "APPLE" not in name.upper():
+        domain = str(c.get("domain") or "").strip().lower().lstrip(".")
+        if host:
+            if not domain or (host != domain and not host.endswith("." + domain)):
                 continue
+        elif domain_hints and not any(h in domain for h in domain_hints):
+            continue
         picked[name] = str(value)
-    return cookie_header_from_dict(picked)
+    return normalize_hme_cookie_header(cookie_header_from_dict(picked))
+
+
+def capture_forward_to_from_page(
+    page: Any,
+    settings: Settings,
+    *,
+    timeout_sec: float = 60.0,
+    logger: logging.Logger | None = None,
+) -> tuple[str, list[str]]:
+    """打开隐藏邮件面板，返回当前选中的转发邮箱与全部候选邮箱。"""
+    lg = logger or log
+    target_url = f"{settings.origin}/icloudplus/"
+    timeout_ms = max(5_000, int(float(timeout_sec) * 1_000))
+    lg.info("stage=forward_to_navigate url=%s", target_url)
+    page.goto(target_url, wait_until="domcontentloaded", timeout=120_000)
+
+    def find_hme_frame() -> Any | None:
+        for frame in page.frames:
+            if "applications/hidemyemail/" in (frame.url or ""):
+                return frame
+        return None
+
+    frame = find_hme_frame()
+    if frame is None:
+        button = page.locator(".hide-my-email-tile .tile-button")
+        button.wait_for(state="visible", timeout=timeout_ms)
+        try:
+            button.click(timeout=timeout_ms)
+        except Exception:
+            button.click(timeout=timeout_ms, force=True)
+        lg.info("stage=forward_to_click selector=.hide-my-email-tile .tile-button")
+
+    deadline = time.monotonic() + max(5.0, float(timeout_sec))
+    while time.monotonic() < deadline:
+        frame = find_hme_frame()
+        if frame is not None:
+            try:
+                frame.locator(".ForwardList").wait_for(state="visible", timeout=3_000)
+                break
+            except Exception:
+                pass
+        page.wait_for_timeout(500)
+    else:
+        raise RuntimeError("隐藏邮件面板未加载 ForwardList")
+
+    options: list[str] = []
+    selected = ""
+    rows = frame.locator(".ForwardList-email")
+    for index in range(rows.count()):
+        row = rows.nth(index)
+        text = " ".join((row.inner_text() or "").split())
+        match = FORWARD_EMAIL_RE.search(text)
+        if not match:
+            continue
+        email = match.group(0).lower()
+        if email not in options:
+            options.append(email)
+        radio = row.locator('input[name="forwardTo"]')
+        if radio.count() and radio.first.is_checked():
+            selected = email
+
+    if not selected:
+        raise RuntimeError(f"未找到已选中的转发邮箱（候选数: {len(options)}）")
+    lg.info(
+        "stage=forward_to_found selected=%s options=%d frame_host=%s",
+        selected,
+        len(options),
+        urlparse(frame.url).netloc or "-",
+    )
+    return selected, options
 
 
 def detect_stage(*, url: str, title: str, cookie_header: str, missing: list[str]) -> str:
@@ -391,6 +550,7 @@ def update_account_cookie(path: Path, cookie_header: str, *, backup: bool = True
     返回写入位置描述。
     """
     path = Path(path)
+    cookie_header = normalize_hme_cookie_header(cookie_header)
     if not path.exists():
         raise FileNotFoundError(f"账户文件不存在: {path}")
 
@@ -438,17 +598,11 @@ def capture_icloud_cookie(
     logger: logging.Logger | None = None,
 ) -> CaptureResult:
     """
-    有头打开 iCloud，等待用户登录（含浏览器内 2FA），采集 cookie 写回账户 YAML。
+    打开 iCloud，采集 cookie 与当前转发邮箱并写回账户 YAML。
     """
     lg = logger or log
     opts = options or CookieCaptureOptions()
     account_path = Path(account.source)
-
-    if opts.headless:
-        lg.warning(
-            "stage=config headless=True 被忽略：本期仅支持有头；后续无头自动化另做"
-        )
-        opts.headless = False
 
     url = opts.url or _default_url(settings)
     dumper: PageDebugDumper | None = None
@@ -469,17 +623,21 @@ def capture_icloud_cookie(
         lg.info("stage=debug_on dir=%s watch=content+iframe+popup", dumper.root)
 
     lg.info(
-        "stage=%s account=%s path=%s url=%s timeout=%ss",
+        "stage=%s account=%s path=%s url=%s timeout=%ss headless=%s",
         STAGE_LAUNCH,
         account.name,
         account_path.name,
         url,
         int(opts.timeout_sec),
+        opts.headless,
     )
-    lg.info(
-        "hint=请在弹出的浏览器中完成 Apple 登录；"
-        "若出现手机验证码/2FA，直接在浏览器页面输入（不要在终端输入验证码）"
-    )
+    if opts.headless:
+        lg.info("hint=无头模式将复用 db/cookie 中的浏览器会话")
+    else:
+        lg.info(
+            "hint=请在弹出的浏览器中完成 Apple 登录；"
+            "若出现手机验证码/2FA，直接在浏览器页面输入（不要在终端输入验证码）"
+        )
 
     try:
         exe = ensure_browser(settings, fetch_if_missing=False)
@@ -510,7 +668,15 @@ def capture_icloud_cookie(
     cookie_header = ""
     missing = list(REQUIRED_COOKIE_KEYS)
     keys: list[str] = []
+    apple_id = ""
+    apple_id_error = ""
+    forward_to = ""
+    forward_options: list[str] = []
+    forward_error = ""
     last_session_sig = ""
+    last_cookie_validation_sig = ""
+    last_cookie_validation_at = 0.0
+    setup_request_host = urlparse(settings.setup_host).hostname or ""
 
     deadline = time.monotonic() + max(30.0, float(opts.timeout_sec))
 
@@ -552,7 +718,7 @@ def capture_icloud_cookie(
 
     try:
         launch_kwargs: dict[str, Any] = {
-            "headless": False,
+            "headless": opts.headless,
             "humanize": opts.humanize,
             "os": opts.os_name,
             "executable_path": exe,
@@ -603,7 +769,10 @@ def capture_icloud_cookie(
                     lg.debug("cookies() error: %s", e)
                     raw_cookies = []
 
-                cookie_header = playwright_cookies_to_header(raw_cookies)
+                cookie_header = playwright_cookies_to_header(
+                    raw_cookies,
+                    request_host=setup_request_host,
+                )
                 keys = parse_cookie_keys(cookie_header)
                 missing = missing_required_keys(cookie_header)
                 stage = detect_stage(
@@ -649,6 +818,35 @@ def capture_icloud_cookie(
 
                 if stage == STAGE_COOKIE_READY:
                     lg.info("stage=%s required_cookies_present", STAGE_COOKIE_READY)
+                    validation_sig = hashlib.sha256(cookie_header.encode("utf-8")).hexdigest()
+                    now = time.monotonic()
+                    if (
+                        validation_sig == last_cookie_validation_sig
+                        and now - last_cookie_validation_at < 15.0
+                    ):
+                        time.sleep(max(0.5, float(opts.poll_interval_sec)))
+                        continue
+                    last_cookie_validation_sig = validation_sig
+                    last_cookie_validation_at = now
+                    try:
+                        with ICloudHMEClient(settings, cookie_header) as hme_client:
+                            api_base = hme_client.validate_and_get_api_base(force=True)
+                            apple_id = hme_client.get_account_apple_id()
+                    except ICloudError as exc:
+                        lg.warning(
+                            "stage=cookie_validate_failed error=%s action=waiting_refresh",
+                            exc,
+                        )
+                        time.sleep(max(0.5, float(opts.poll_interval_sec)))
+                        continue
+                    lg.info(
+                        "stage=cookie_validated api_host=%s apple_id=%s",
+                        urlparse(api_base).netloc or "-",
+                        apple_id or "-",
+                    )
+                    if not apple_id:
+                        apple_id_error = "iCloud 校验响应中没有主 Apple ID"
+                        lg.warning("stage=apple_id_missing")
                     if opts.follow_appleid and (opts.appleid_url or "").strip():
                         dest = opts.appleid_url.strip()
                         lg.info("stage=follow_appleid goto=%s", dest)
@@ -658,11 +856,61 @@ def capture_icloud_cookie(
                             lg.warning("stage=follow_appleid_failed %s", exc)
                         if dumper:
                             dumper.dump_context(context, stage="follow_appleid", lg=lg)
+                        try:
+                            follow_title = page.title() or ""
+                        except Exception:
+                            follow_title = ""
                         persist_browser_cookies(
                             context,
                             page_url=page.url or dest,
-                            title=page.title() if hasattr(page, "title") else "",
+                            title=follow_title,
                             stage="follow_appleid",
+                        )
+                        try:
+                            refreshed = playwright_cookies_to_header(
+                                context.cookies(),
+                                request_host=setup_request_host,
+                            )
+                            if not missing_required_keys(refreshed):
+                                with ICloudHMEClient(settings, refreshed) as hme_client:
+                                    hme_client.validate_and_get_api_base(force=True)
+                                    refreshed_apple_id = hme_client.get_account_apple_id()
+                                cookie_header = refreshed
+                                keys = parse_cookie_keys(cookie_header)
+                                if refreshed_apple_id:
+                                    apple_id = refreshed_apple_id
+                                    apple_id_error = ""
+                        except Exception as exc:
+                            lg.warning(
+                                "stage=follow_appleid_cookie_refresh_failed error=%s "
+                                "action=keep_validated_cookie",
+                                exc,
+                            )
+                    if opts.capture_forward_to:
+                        try:
+                            forward_to, forward_options = capture_forward_to_from_page(
+                                page,
+                                settings,
+                                timeout_sec=opts.forward_timeout_sec,
+                                logger=lg,
+                            )
+                        except Exception as exc:
+                            forward_error = f"{type(exc).__name__}: {exc}"
+                            lg.warning(
+                                "stage=forward_to_failed error=%s action=keep_validated_cookie",
+                                forward_error,
+                            )
+                        if dumper:
+                            dumper.dump_context(context, stage="forward_to", lg=lg)
+                        try:
+                            forward_title = page.title() or ""
+                        except Exception:
+                            forward_title = ""
+                        persist_browser_cookies(
+                            context,
+                            page_url=getattr(page, "url", "") or "",
+                            title=forward_title,
+                            stage="forward_to",
                         )
                     break
 
@@ -728,6 +976,44 @@ def capture_icloud_cookie(
                 cookie_keys_summary(keys),
             )
 
+            wrote = [where]
+            if apple_id:
+                try:
+                    apple_id_where = update_account_apple_id(
+                        account_path,
+                        apple_id,
+                        backup=False,
+                    )
+                except Exception as exc:
+                    apple_id_error = f"YAML 回填失败: {type(exc).__name__}: {exc}"
+                    lg.warning("stage=apple_id_write_failed error=%s", apple_id_error)
+                else:
+                    wrote.append(apple_id_where)
+                    lg.info(
+                        "stage=apple_id_written wrote=%s file=%s apple_id=%s",
+                        apple_id_where,
+                        account_path.name,
+                        apple_id,
+                    )
+            if forward_to:
+                try:
+                    inbox_where = update_account_inbox(
+                        account_path,
+                        forward_to,
+                        backup=False,
+                    )
+                except Exception as exc:
+                    forward_error = f"YAML 回填失败: {type(exc).__name__}: {exc}"
+                    lg.warning("stage=forward_to_write_failed error=%s", forward_error)
+                else:
+                    wrote.append(inbox_where)
+                    lg.info(
+                        "stage=forward_to_written wrote=%s file=%s selected=%s",
+                        inbox_where,
+                        account_path.name,
+                        forward_to,
+                    )
+
             keep_open = max(0.0, float(opts.keep_open_sec or 0.0))
             if keep_open > 0:
                 lg.info(
@@ -775,19 +1061,27 @@ def capture_icloud_cookie(
         keys=keys,
         missing=[],
         account_path=str(account_path),
-        message=f"已写入 {where}",
+        message=f"已写入 {', '.join(wrote)}",
         debug_dir=str(dumper.root) if dumper else "",
         debug_pages=dumper.count if dumper else 0,
+        apple_id=apple_id,
+        apple_id_error=apple_id_error,
+        forward_to=forward_to,
+        forward_options=forward_options,
+        forward_error=forward_error,
     )
 
 
 __all__ = [
     "CaptureResult",
     "CookieCaptureOptions",
+    "capture_forward_to_from_page",
     "capture_icloud_cookie",
     "detect_stage",
     "playwright_cookies_to_header",
     "update_account_cookie",
+    "update_account_apple_id",
+    "update_account_inbox",
     "update_account_app_password",
     "extract_app_passwords",
 ]

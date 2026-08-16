@@ -7,6 +7,7 @@ from urllib.parse import urlencode
 import requests
 
 from .config import Settings
+from .cookies import normalize_hme_cookie_header
 
 
 class ICloudError(RuntimeError):
@@ -45,6 +46,8 @@ class ICloudHMEClient:
         self.settings = settings
         self.timeout = timeout
         self._api_base: str | None = None
+        self._validation_data: dict[str, Any] | None = None
+        self.cookies = normalize_hme_cookie_header(cookies)
 
         self.session = requests.Session()
         self.session.headers.update(
@@ -57,7 +60,7 @@ class ICloudHMEClient:
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/122.0.0.0 Safari/537.36"
                 ),
-                "Cookie": cookies,
+                "Cookie": self.cookies,
             }
         )
 
@@ -114,6 +117,7 @@ class ICloudHMEClient:
         data = self._request("POST", url)
         if not isinstance(data, dict) or "webservices" not in data:
             raise ICloudError("凭证已失效，请重新登录并更新 accounts/*.yml")
+        self._validation_data = data
 
         ws = data["webservices"]
         candidates = ("maildomainws", "premiummailsettings")
@@ -137,6 +141,20 @@ class ICloudHMEClient:
 
         self._api_base = str(found_url).rstrip("/")
         return self._api_base
+
+    def get_account_apple_id(self) -> str:
+        """返回校验响应中的主 Apple ID，而不是 iCloud 邮箱别名。"""
+        if self._validation_data is None:
+            self.validate_and_get_api_base()
+        data = self._validation_data or {}
+        ds_info = data.get("dsInfo")
+        if not isinstance(ds_info, dict):
+            return ""
+        for key in ("appleId", "primaryEmail"):
+            value = str(ds_info.get(key) or "").strip().lower()
+            if value:
+                return value
+        return ""
 
     def call_api(self, path: str, method: str = "GET", payload: dict | None = None) -> Any:
         base = self.validate_and_get_api_base()

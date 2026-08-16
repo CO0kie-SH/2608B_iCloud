@@ -138,6 +138,8 @@ class MailRecord:
     from_addr: str
     sender_addr: str
     return_path: str
+    received_spf: str
+    envelope_from: str
     is_relayed: int
     relay_label: str
     to_addr: str
@@ -400,6 +402,40 @@ class AliasDB:
             )
             conn.execute(
                 """
+                CREATE TABLE IF NOT EXISTS production_loop_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    enabled INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'stopped',
+                    interface TEXT NOT NULL DEFAULT 'legacy',
+                    mode TEXT NOT NULL DEFAULT 'forever',
+                    duration_minutes INTEGER NOT NULL DEFAULT 0,
+                    interval_sec INTEGER NOT NULL DEFAULT 2,
+                    selected_accounts_json TEXT NOT NULL DEFAULT '[]',
+                    started_at TEXT NOT NULL DEFAULT '',
+                    deadline_at INTEGER NOT NULL DEFAULT 0,
+                    current_account TEXT NOT NULL DEFAULT '',
+                    current_job_id TEXT NOT NULL DEFAULT '',
+                    next_run_at INTEGER NOT NULL DEFAULT 0,
+                    round_no INTEGER NOT NULL DEFAULT 0,
+                    submitted INTEGER NOT NULL DEFAULT 0,
+                    created INTEGER NOT NULL DEFAULT 0,
+                    failed INTEGER NOT NULL DEFAULT 0,
+                    skipped INTEGER NOT NULL DEFAULT 0,
+                    progress_json TEXT NOT NULL DEFAULT '[]',
+                    last_error TEXT NOT NULL DEFAULT '',
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO production_loop_state (id, updated_at)
+                VALUES (1, ?)
+                """,
+                (utc_now(),),
+            )
+            conn.execute(
+                """
                 CREATE TABLE IF NOT EXISTS client_sync_state (
                     client_id TEXT PRIMARY KEY,
                     last_seen_at TEXT NOT NULL,
@@ -476,6 +512,7 @@ class AliasDB:
                     from_addr TEXT NOT NULL DEFAULT '',
                     sender_addr TEXT NOT NULL DEFAULT '',
                     return_path TEXT NOT NULL DEFAULT '',
+                    received_spf TEXT NOT NULL DEFAULT '',
                     is_relayed INTEGER NOT NULL DEFAULT 0,
                     relay_label TEXT NOT NULL DEFAULT '',
                     to_addr TEXT NOT NULL DEFAULT '',
@@ -521,6 +558,15 @@ class AliasDB:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_mails_message_id ON mails(message_id)"
             )
+            mail_cols = self._table_columns(conn, "mails")
+            if "envelope_from" not in mail_cols:
+                conn.execute(
+                    "ALTER TABLE mails ADD COLUMN envelope_from TEXT NOT NULL DEFAULT ''"
+                )
+            if "received_spf" not in mail_cols:
+                conn.execute(
+                    "ALTER TABLE mails ADD COLUMN received_spf TEXT NOT NULL DEFAULT ''"
+                )
 
             # ---------- 增量收取水位 ----------
             conn.execute(
@@ -529,6 +575,7 @@ class AliasDB:
                     account TEXT NOT NULL,
                     mailbox TEXT NOT NULL,
                     last_uid INTEGER NOT NULL DEFAULT 0,
+                    sync_cursor TEXT NOT NULL DEFAULT '',
                     last_sync_at TEXT NOT NULL DEFAULT '',
                     last_status TEXT NOT NULL DEFAULT '',
                     last_error TEXT NOT NULL DEFAULT '',
@@ -537,6 +584,11 @@ class AliasDB:
                 )
                 """
             )
+            sync_cols = self._table_columns(conn, "mail_sync_state")
+            if "sync_cursor" not in sync_cols:
+                conn.execute(
+                    "ALTER TABLE mail_sync_state ADD COLUMN sync_cursor TEXT NOT NULL DEFAULT ''"
+                )
 
             # ---------- 分组（本期只建表 + 最小 CRUD，UI 后续再做）----------
             # 用独立关联表而非给 aliases 加列：upsert_alias 在同步时会覆写别名行，
@@ -896,6 +948,89 @@ class AliasDB:
             ).fetchall()
         return [self._production_job_dict(row) for row in rows]
 
+    def get_production_loop_state(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM production_loop_state WHERE id = 1"
+            ).fetchone()
+        if not row:
+            return {}
+        state = dict(row)
+        state["enabled"] = bool(state.get("enabled"))
+        for source, target in (
+            ("selected_accounts_json", "selected_accounts"),
+            ("progress_json", "progress"),
+        ):
+            try:
+                value = json.loads(state.pop(source) or "[]")
+            except (TypeError, ValueError):
+                value = []
+            state[target] = value if isinstance(value, list) else []
+        return state
+
+    def update_production_loop_state(self, **changes: Any) -> dict[str, Any]:
+        allowed = {
+            "enabled",
+            "status",
+            "interface",
+            "mode",
+            "duration_minutes",
+            "interval_sec",
+            "selected_accounts_json",
+            "started_at",
+            "deadline_at",
+            "current_account",
+            "current_job_id",
+            "next_run_at",
+            "round_no",
+            "submitted",
+            "created",
+            "failed",
+            "skipped",
+            "progress_json",
+            "last_error",
+        }
+        normalized: dict[str, Any] = {}
+        for key, value in changes.items():
+            target = key
+            if key == "selected_accounts":
+                target = "selected_accounts_json"
+                value = json.dumps(list(value or []), ensure_ascii=False)
+            elif key == "progress":
+                target = "progress_json"
+                value = json.dumps(list(value or [])[-200:], ensure_ascii=False)
+            elif key == "enabled":
+                value = 1 if value else 0
+            if target in allowed:
+                normalized[target] = value
+        if not normalized:
+            return self.get_production_loop_state()
+        normalized["updated_at"] = utc_now()
+        sql = "UPDATE production_loop_state SET " + ", ".join(
+            f"{key} = ?" for key in normalized
+        )
+        with self._connect() as conn:
+            conn.execute(
+                sql + " WHERE id = 1",
+                [*normalized.values()],
+            )
+            conn.commit()
+        return self.get_production_loop_state()
+
+    def mark_incomplete_production_jobs(self, reason: str = "服务重启，任务已中断") -> int:
+        now = utc_now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE production_jobs
+                SET status = 'error', error = ?, finished_at = ?, updated_at = ?
+                WHERE status IN ('pending', 'running')
+                """,
+                ((reason or "服务重启，任务已中断")[:500], now, now),
+            )
+            conn.commit()
+            return int(cur.rowcount or 0)
+
     def mark_cookie_invalid(self, account: str, reason: str = "http_421") -> dict[str, Any]:
         account = (account or "").strip()
         if not account:
@@ -975,6 +1110,21 @@ class AliasDB:
     def is_cookie_invalid(self, account: str) -> bool:
         flag = self.get_account_flag(account)
         return bool(flag and flag["cookie_invalid"])
+
+    def reconcile_cookie_flag(self, account: Any) -> dict[str, Any] | None:
+        """手工更新账户 YAML 后，清除早于文件更新时间的 421 标记。"""
+        name = str(getattr(account, "name", "") or "").strip()
+        flag = self.get_account_flag(name)
+        if not flag or not flag.get("cookie_invalid") or not getattr(account, "ok", False):
+            return flag
+        source = str(getattr(account, "source", "") or "").strip()
+        try:
+            modified_at = int(Path(source).stat().st_mtime)
+        except (OSError, ValueError):
+            return flag
+        if modified_at > int(flag.get("marked_at") or 0):
+            return self.clear_cookie_invalid(name)
+        return flag
 
     def assert_cookie_ready(self, account: str) -> None:
         from .client import CookieInvalidError
@@ -1150,6 +1300,8 @@ class AliasDB:
         from_addr: str = "",
         sender_addr: str = "",
         return_path: str = "",
+        received_spf: str = "",
+        envelope_from: str = "",
         is_relayed: bool = False,
         relay_label: str = "",
         to_addr: str = "",
@@ -1188,13 +1340,14 @@ class AliasDB:
                 """
                 INSERT INTO mails (
                     account, parent_mail, mailbox, uid, message_id, alias_hme,
-                    from_name, from_addr, sender_addr, return_path, is_relayed, relay_label,
+                    from_name, from_addr, sender_addr, return_path, received_spf, envelope_from,
+                    is_relayed, relay_label,
                     to_addr, delivered_to, subject, mail_type, code, summary,
                     date_header, date_utc, internaldate, size, flags_json, is_seen,
                     has_attachment, attachments_json, body_text_len, body_html_len,
                     content_type, fetched_at, created_at, updated_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                          ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account, mailbox, uid) DO UPDATE SET
                     parent_mail=CASE WHEN excluded.parent_mail != '' THEN excluded.parent_mail ELSE mails.parent_mail END,
                     message_id=CASE WHEN excluded.message_id != '' THEN excluded.message_id ELSE mails.message_id END,
@@ -1203,6 +1356,8 @@ class AliasDB:
                     from_addr=excluded.from_addr,
                     sender_addr=excluded.sender_addr,
                     return_path=excluded.return_path,
+                    received_spf=CASE WHEN excluded.received_spf != '' THEN excluded.received_spf ELSE mails.received_spf END,
+                    envelope_from=CASE WHEN excluded.envelope_from != '' THEN excluded.envelope_from ELSE mails.envelope_from END,
                     is_relayed=excluded.is_relayed,
                     relay_label=excluded.relay_label,
                     to_addr=excluded.to_addr,
@@ -1236,6 +1391,8 @@ class AliasDB:
                     from_addr,
                     sender_addr,
                     return_path,
+                    received_spf,
+                    envelope_from,
                     1 if is_relayed else 0,
                     relay_label,
                     to_addr,
@@ -1417,6 +1574,7 @@ class AliasDB:
                 "account": account,
                 "mailbox": mailbox,
                 "last_uid": 0,
+                "sync_cursor": "",
                 "last_sync_at": "",
                 "last_status": "",
                 "last_error": "",
@@ -1430,6 +1588,7 @@ class AliasDB:
         mailbox: str,
         *,
         last_uid: int,
+        sync_cursor: str | None = None,
         status: str = "ok",
         error: str = "",
         saved_delta: int = 0,
@@ -1439,10 +1598,15 @@ class AliasDB:
             conn.execute(
                 """
                 INSERT INTO mail_sync_state (
-                    account, mailbox, last_uid, last_sync_at, last_status, last_error, total_saved
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    account, mailbox, last_uid, sync_cursor, last_sync_at,
+                    last_status, last_error, total_saved
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(account, mailbox) DO UPDATE SET
                     last_uid=MAX(excluded.last_uid, mail_sync_state.last_uid),
+                    sync_cursor=CASE
+                        WHEN excluded.sync_cursor != '' THEN excluded.sync_cursor
+                        ELSE mail_sync_state.sync_cursor
+                    END,
                     last_sync_at=excluded.last_sync_at,
                     last_status=excluded.last_status,
                     last_error=excluded.last_error,
@@ -1452,6 +1616,7 @@ class AliasDB:
                     account,
                     mailbox,
                     max(0, int(last_uid)),
+                    str(sync_cursor or ""),
                     now,
                     status,
                     error,
@@ -1464,12 +1629,15 @@ class AliasDB:
         with self._connect() as conn:
             if account:
                 rows = conn.execute(
-                    "SELECT * FROM mail_sync_state WHERE account = ? ORDER BY mailbox",
+                    "SELECT account, mailbox, last_uid, last_sync_at, last_status, "
+                    "last_error, total_saved FROM mail_sync_state "
+                    "WHERE account = ? ORDER BY mailbox",
                     (account,),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM mail_sync_state ORDER BY account, mailbox"
+                    "SELECT account, mailbox, last_uid, last_sync_at, last_status, "
+                    "last_error, total_saved FROM mail_sync_state ORDER BY account, mailbox"
                 ).fetchall()
         return [dict(r) for r in rows]
 
@@ -1597,6 +1765,8 @@ class AliasDB:
             from_addr=row["from_addr"],
             sender_addr=row["sender_addr"],
             return_path=row["return_path"],
+            received_spf=row["received_spf"] if "received_spf" in row.keys() else "",
+            envelope_from=row["envelope_from"] if "envelope_from" in row.keys() else "",
             is_relayed=row["is_relayed"],
             relay_label=row["relay_label"],
             to_addr=row["to_addr"],

@@ -35,7 +35,7 @@ if "%DO_LIST%"=="1" (
 )
 
 if "%DO_ALL%"=="0" if not defined ACCOUNT (
-  echo [ERR] 必须指定 -a 账户，或使用 --all / --list
+  call :say "[ERR] 必须指定 -a 账户，或使用 --all / --list"
   call :usage
   exit /b 2
 )
@@ -48,12 +48,12 @@ set "FAILED_TOTAL=0"
 set "SUBMITTED=0"
 
 if "%FOREVER%"=="1" (
-  echo [INFO] 无限循环生产，接口=%INTERFACE%，Ctrl+C 停止，日志=%LOG%
+  call :say "[INFO] 无限循环生产，接口=%INTERFACE%，Ctrl+C 停止，日志=%LOG%"
 ) else if %LOOP_MIN% GTR 0 (
   set /a LOOP_SEC=%LOOP_MIN%*60
   call :now_epoch START_EPOCH
   set /a DEADLINE=!START_EPOCH!+!LOOP_SEC!
-  echo [INFO] 循环生产 %LOOP_MIN% 分钟，接口=%INTERFACE%，日志=%LOG%
+  call :say "[INFO] 循环生产 %LOOP_MIN% 分钟，接口=%INTERFACE%，日志=%LOG%"
 )
 
 :round
@@ -81,17 +81,17 @@ call :deadline_hit
 if !DEADLINE_HIT! EQU 1 goto :finish
 set "SLEEPFOR=%INTERVAL%"
 if !NEXT_WAIT! GTR !SLEEPFOR! set "SLEEPFOR=!NEXT_WAIT!"
-if !SLEEPFOR! GTR %INTERVAL% echo [WAIT] 本轮最短风控 !SLEEPFOR!s，扫完再睡
+if !SLEEPFOR! GTR %INTERVAL% call :say "[WAIT] 本轮最短风控 !SLEEPFOR!s，扫完再睡"
 call :sleep !SLEEPFOR!
 goto :round
 
 :finish
 echo.
-echo ========== 汇总 ==========
-echo 提交任务: %SUBMITTED%
-echo 成功生产: %CREATED_TOTAL%
-echo 失败条目: %FAILED_TOTAL%
-echo 日志: %LOG%
+call :say "========== 汇总 =========="
+call :say "提交任务: %SUBMITTED%"
+call :say "成功生产: %CREATED_TOTAL%"
+call :say "失败条目: %FAILED_TOTAL%"
+call :say "日志: %LOG%"
 if %CREATED_TOTAL% GTR 0 (exit /b 0) else (exit /b 1)
 
 rem ------------------------------------------------------------------
@@ -167,8 +167,8 @@ exit /b 0
 curl.exe -sS -m 5 "%BASE_URL%/api/health" -o "%TMPDIR%\health.json" -w "%%{http_code}" > "%TMPDIR%\health.code"
 set /p HCODE=<"%TMPDIR%\health.code"
 if not "%HCODE%"=="200" (
-  echo [ERR] 服务没起来: %BASE_URL%  HTTP %HCODE%
-  echo       先跑 start_web.bat
+  call :say "[ERR] 服务没起来: %BASE_URL%  HTTP %HCODE%"
+  call :say "      先跑 start_web.bat"
   exit /b 1
 )
 exit /b 0
@@ -178,10 +178,10 @@ call :health
 if errorlevel 1 exit /b 1
 curl.exe -sS -m 15 "%BASE_URL%/api/production/options" -o "%TMPDIR%\options.json"
 if errorlevel 1 (
-  echo [ERR] 拉 options 失败
+  call :say "[ERR] 拉 options 失败"
   exit /b 1
 )
-echo ---------- 生产选项 ----------
+call :say "---------- 生产选项 ----------"
 type "%TMPDIR%\options.json"
 echo.
 exit /b 0
@@ -189,7 +189,7 @@ exit /b 0
 :load_accounts
 curl.exe -sS -m 15 "%BASE_URL%/api/production/options" -o "%TMPDIR%\options.json"
 if errorlevel 1 (
-  echo [ERR] 拉 options 失败
+  call :say "[ERR] 拉 options 失败"
   exit /b 1
 )
 set "ROUND_ACCOUNTS="
@@ -197,7 +197,7 @@ for /f "usebackq delims=" %%N in (`cscript //nologo "%JSONJS%" names "%TMPDIR%\o
   set "ROUND_ACCOUNTS=!ROUND_ACCOUNTS! %%N"
 )
 if not defined ROUND_ACCOUNTS (
-  echo [WARN] options 里没有账户
+  call :say "[WARN] options 里没有账户"
   exit /b 1
 )
 exit /b 0
@@ -206,7 +206,7 @@ exit /b 0
 set "ACC=%~1"
 set /a SUBMITTED+=1
 echo.
-echo [POST] %ACC%  interface=%INTERFACE%  count=%COUNT%  threads=%THREADS%
+call :say "[POST] %ACC%  interface=%INTERFACE%  count=%COUNT%  threads=%THREADS%"
 call :log "POST account=%ACC% interface=%INTERFACE% count=%COUNT% threads=%THREADS%"
 
 > "%TMPDIR%\req.json" echo {"account":"%ACC%","interface":"%INTERFACE%","count":%COUNT%,"threads":%THREADS%}
@@ -224,7 +224,7 @@ set "RETRY_AFTER="
 
 if "%PCODE%"=="429" (
   call :hdr_retry_after
-  echo [429] 服务限流，Retry-After=!RETRY_AFTER!s
+  call :say "[429] 服务限流，Retry-After=!RETRY_AFTER!s"
   call :log "429 account=%ACC% retry_after=!RETRY_AFTER!"
   set /a FAILED_TOTAL+=1
   call :note_wait !RETRY_AFTER!
@@ -232,14 +232,14 @@ if "%PCODE%"=="429" (
 )
 
 if "%PCODE%"=="409" (
-  echo [409] COOKIE_INVALID  %ACC% 已标记失效，跳过
+  call :say "[409] COOKIE_INVALID  %ACC% 已标记失效，跳过"
   call :log "COOKIE_INVALID account=%ACC%"
   set /a FAILED_TOTAL+=1
   exit /b 0
 )
 
 if not "%PCODE%"=="202" if not "%PCODE%"=="200" (
-  echo [ERR] 提交失败 HTTP %PCODE%
+  call :say "[ERR] 提交失败 HTTP %PCODE%"
   type "%TMPDIR%\resp.json"
   echo.
   call :log "SUBMIT_FAIL http=%PCODE%"
@@ -249,31 +249,31 @@ if not "%PCODE%"=="202" if not "%PCODE%"=="200" (
 
 for /f "usebackq delims=" %%V in (`cscript //nologo "%JSONJS%" get "%TMPDIR%\resp.json" job_id`) do set "JOB_ID=%%V"
 if not defined JOB_ID (
-  echo [ERR] 响应里没有 job_id
+  call :say "[ERR] 响应里没有 job_id"
   type "%TMPDIR%\resp.json"
   echo.
   set /a FAILED_TOTAL+=1
   exit /b 0
 )
-echo [JOB] !JOB_ID!  HTTP %PCODE%
+call :say "[JOB] !JOB_ID!  HTTP %PCODE%"
 
 :poll_job
 curl.exe -sS -m 20 "%BASE_URL%/api/production/jobs/!JOB_ID!" -o "%TMPDIR%\job.json" -w "%%{http_code}" > "%TMPDIR%\job.code"
 set /p JCODE=<"%TMPDIR%\job.code"
 if not "!JCODE!"=="200" (
-  echo [WARN] 查任务 HTTP !JCODE!，重试
+  call :say "[WARN] 查任务 HTTP !JCODE!，重试"
   call :sleep 2
   goto :poll_job
 )
 set "JSTATUS="
 for /f "usebackq delims=" %%V in (`cscript //nologo "%JSONJS%" get "%TMPDIR%\job.json" status`) do set "JSTATUS=%%V"
 if /i "!JSTATUS!"=="pending" (
-  echo [..] !JOB_ID! pending
+  call :say "[..] !JOB_ID! pending"
   call :sleep 2
   goto :poll_job
 )
 if /i "!JSTATUS!"=="running" (
-  echo [..] !JOB_ID! running
+  call :say "[..] !JOB_ID! running"
   call :sleep 2
   goto :poll_job
 )
@@ -285,16 +285,16 @@ for /f "usebackq delims=" %%V in (`cscript //nologo "%JSONJS%" get "%TMPDIR%\job
 if not defined JCREATED set "JCREATED=0"
 
 if /i "!JSTATUS!"=="done" (
-  echo [OK] !JOB_ID! created=!JCREATED!
+  call :say "[OK] !JOB_ID! created=!JCREATED!"
   if !JCREATED! GTR 0 (
     for /f "usebackq delims=" %%H in (`cscript //nologo "%JSONJS%" hmes "%TMPDIR%\job.json"`) do (
-      echo        + %%H
+      call :say "       + %%H"
       call :log "CREATED %%H"
     )
     set /a CREATED_TOTAL+=JCREATED
   )
   if defined JERROR if not "!JERROR!"=="" (
-    echo [NOTE] 部分失败: !JERROR!
+    call :say "[NOTE] 部分失败: !JERROR!"
     call :maybe_wait_rate
     set /a FAILED_TOTAL+=1
   )
@@ -302,8 +302,8 @@ if /i "!JSTATUS!"=="done" (
   exit /b 0
 )
 
-echo [FAIL] !JOB_ID! status=!JSTATUS! created=!JCREATED!
-if defined JERROR echo        !JERROR!
+call :say "[FAIL] !JOB_ID! status=!JSTATUS! created=!JCREATED!"
+if defined JERROR call :say "       !JERROR!"
 call :log "FAIL job=!JOB_ID! account=%ACC% status=!JSTATUS! created=!JCREATED! error=!JERROR!"
 set /a FAILED_TOTAL+=1
 call :maybe_wait_rate
@@ -316,7 +316,7 @@ if errorlevel 1 exit /b 0
 set "WAITSEC="
 for /f "usebackq delims=" %%R in (`cscript //nologo "%JSONJS%" retryfile "%TMPDIR%\job.json"`) do set "WAITSEC=%%R"
 if not defined WAITSEC set "WAITSEC=30"
-echo [NOTE] 服务风控 hint=!WAITSEC!s，本轮继续扫其他账户
+call :say "[NOTE] 服务风控 hint=!WAITSEC!s，本轮继续扫其他账户"
 call :note_wait !WAITSEC!
 exit /b 0
 
@@ -342,8 +342,18 @@ for /f "usebackq tokens=1,* delims=:" %%H in ("%TMPDIR%\resp.hdr") do (
 if not defined RETRY_AFTER set "RETRY_AFTER=30"
 exit /b 0
 
+:now_clock
+for /f %%T in ('powershell -NoProfile -Command "Get-Date -Format HH:mm:ss"') do set "NOWCLK=%%T"
+exit /b 0
+
+:say
+call :now_clock
+echo [!NOWCLK!] %~1
+exit /b 0
+
 :log
->> "%LOG%" echo [%DATE% %TIME%] %~1
+call :now_clock
+>> "%LOG%" echo [!NOWCLK!] %~1
 exit /b 0
 
 :now_epoch

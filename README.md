@@ -6,9 +6,23 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.8.15** |
+| **版本** | **26.8.16** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
-| **最后更新** | 2026-08-15 |
+| **最后更新** | 2026-08-16 |
+
+---
+
+## 版本 26.8.16 变更摘要
+
+| 模块 | 变更 |
+|------|------|
+| Outlook 收件 | 自动识别 `accounts/<outlook邮箱>.txt` 四列 OAuth 授权，通过 Microsoft Graph 读取收件箱与垃圾箱 |
+| 增量同步 | Outlook 使用 Graph `deltaLink/nextLink` 游标；iCloud/163 继续使用 IMAP UID 水位 |
+| 邮件详情 | 按 provider 自动选择 IMAP 或 Graph，Graph 邮件可按消息 ID 实时读取正文 |
+| SPF 信息 | 邮件表新增完整 `received_spf`，同时保留抽取后的 `envelope_from` |
+| 验证码导出 | `mail-export-codes` 输出 `sava/verification_codes.csv`；写前移除只读，原子写入后恢复只读 |
+
+**升级注意：** 首次运行会给 `mails` 增加 `received_spf`，给 `mail_sync_state` 增加内部 Graph 游标字段；迁移自动执行。
 
 ---
 
@@ -23,6 +37,7 @@
 | cookie-login | `--debug` 按页面内容变化落盘；`--keep-open` 挂窗；`--appleid` 登录后再打开设置页 |
 | 会话复用 | 实验性质：`db/cookie/<账户>.json` 保存并在下次注入浏览器会话 |
 | Web 设置 | 顶栏设置框，仅前端时区偏移，默认 UTC+8 |
+| 轮询生产 | `/production-loop` 独立线程按勾选账号顺序生产，支持无限/定时运行与服务重启恢复 |
 | 新增账户 | README 补充 003 接入步骤 |
 
 **升级注意：** 首次启动会给 `create_events` 补 unix 时间列，并建 `account_flags`。旧 YAML 仍可用。中国区号生产时 Web/CLI 需 `--region cn`，或先把 cookie 收成 `X-APPLE-*` 再打国际站 setup。
@@ -83,7 +98,7 @@ python main.py quota -a user001@icloud.com
 | 安全随机 | 按 OS 切换：Linux `getrandom`/`urandom`，Windows/macOS `secrets` |
 | 邮件 | IMAP/SMTP；`type`/`summary`/`code`；按 UID 取 JSON |
 | WebUI | 邮箱池、邮件分类、文本/HTML详情、后台增量同步 |
-| 生产 | 按账号控制数量和线程；任务进度与结果持久化 |
+| 生产 | 单次生产页 + 独立轮询页；按账号控制参与范围，任务进度与结果持久化 |
 | 多客户端 | 打开即同步；生产历史、配额和邮件状态以服务器 SQLite 为准 |
 | Cookie 采集 | Camoufox **有头**登录 iCloud → 写回 `apple.cookie`（2FA 在浏览器完成） |
 | CLI | `main.py` 子命令；`generate_alias.bat`；`start_web.bat`；`cookie_login.bat`；`produce.bat` / `produce.sh` |
@@ -97,7 +112,7 @@ python main.py quota -a user001@icloud.com
 ├── main.py
 ├── generate_alias.bat
 ├── start_web.bat
-├── cookie_login.bat                # 有头登录 / debug / 会话复用
+├── cookie_login.bat                # 登录 / 无头采集 / debug / 会话复用
 ├── produce.bat / produce.sh        # 独立 curl 生产客户端（不参与风控）
 ├── requirements.txt
 ├── .env / .env.example          # 本地密钥，勿提交
@@ -117,6 +132,8 @@ python main.py quota -a user001@icloud.com
 │   ├── __init__.py
 │   ├── app.py                  # FastAPI 应用
 │   ├── jobs.py                 # 收信/生产后台任务
+│   ├── production_loop.py      # 持久化单线程轮询控制器
+│   ├── production_service.py   # 单次/轮询共用的生产提交入口
 │   ├── routers/                # Web API
 │   ├── static/                 # 邮箱池、生产页、设置
 │   └── templates/              # HTML 页面
@@ -165,7 +182,7 @@ python main.py camoufox-path     # 查看路径与是否已安装
 ```
 
 > 探测安装状态**只扫本地文件**，不会调用会 `cleanup` 删目录的官方 `pkgman.install`。
-### Cookie 有头采集（含 2FA）
+### Cookie 与转发邮箱采集（含无头模式）
 
 Cookie 过期（如 HTTP 421）时：
 
@@ -173,24 +190,29 @@ Cookie 过期（如 HTTP 421）时：
 python main.py cookie-login -a user001@icloud.com
 # 可选：--timeout 600  --url https://www.icloud.com/
 # 采完先不关浏览器，再挂 120 秒：
-python main.py cookie-login -a maohongwei003@icloud.com --keep-open 120
+python main.py cookie-login -a user003@icloud.com --keep-open 120
 # 打开 Apple 账户页，复用 db/cookie 会话，并继续扒页面 / App 专用密码：
-python main.py cookie-login -a maohongwei003@icloud.com --appleid --debug --keep-open 1200
+python main.py cookie-login -a user003@icloud.com --appleid --debug --keep-open 1200
 # 中国区：打开 www.icloud.com.cn
-python main.py cookie-login -a maohongwei003@icloud.com --region cn --debug --keep-open 1200
+python main.py cookie-login -a user003@icloud.com --region cn --debug --keep-open 1200
+# 已建立登录会话后，无头刷新 Cookie 并自动回填 inbox.mail：
+python main.py cookie-login -a user005@icloud.com --region cn --headless
 # 等价写法：
-python main.py cookie-login -a maohongwei003@icloud.com --suffix cn
+python main.py cookie-login -a user003@icloud.com --suffix cn
 ```
 
 1. 弹出 **有头** Camoufox 窗口，打开 iCloud。  
 2. **你在浏览器里**完成 Apple 登录。  
 3. 若出现手机验证码 / 双重认证：**在浏览器页面输入**，不要在终端输验证码。  
 4. 脚本轮询 Cookie；必填键齐全后写回账户 YAML（`apple.cookie` 或根级 `cookie`），并生成 `.bak`。  
-5. `--keep-open SEC`：写回成功后浏览器再开 SEC 秒，到点再关；默认 `0` 立刻关。  
-6. `--debug`：页面**内容一变**就落盘（同一 URL 的弹窗/iframe 也会再采），目录 `logs/page-debug-<账户>-<时间>/`。扫到 `xxxx-xxxx-xxxx-xxxx` 形态的 App 专用密码会写回 YAML 的 `apple.app_password`，给 IMAP 用。  
-7. `--appleid`：先在 iCloud 登录（`--region cn` → `https://www.icloud.com.cn/`），必填 cookie 齐后再打开设置页 `https://www.icloud.com.cn/settings/`（debug 里第一次看到 Apple 账户邮箱的页面）。没有 `appleid.apple.com.cn`。  
-8. 实验性质会话复用：浏览器 cookie 写入 `db/cookie/<账户>.json`，下次 `cookie-login` 自动注入；`--debug` 时每次变化再记一份 `db/cookie/<账户>/<时间>-<host>.json`。`--no-reuse-session` 可关掉。  
-7. 过程写入 `logs/cookie-login-...log`（脱敏，不含完整 cookie / 验证码）。
+5. Cookie 在线校验后自动读取主 Apple ID 并回填 `apple.appleid`；使用主邮箱，不会误写成 iCloud 邮箱别名。
+6. 默认打开 iCloud+ 的“隐藏邮件地址”，读取当前选中的“转发至”邮箱并回填 `inbox.mail`；`--no-forward-to` 可跳过。
+7. `--headless`：不显示浏览器窗口，复用 `db/cookie/<账户>.json` 完成采集。首次登录或需要 2FA 时先运行一次有头模式建立会话。
+8. `--keep-open SEC`：写回成功后浏览器再开 SEC 秒，到点再关；默认 `0` 立刻关。
+9. `--debug`：页面**内容一变**就落盘（同一 URL 的弹窗/iframe 也会再采），目录 `logs/page-debug-<账户>-<时间>/`。扫到 `xxxx-xxxx-xxxx-xxxx` 形态的 App 专用密码会写回 YAML 的 `apple.app_password`，给 IMAP 用。
+10. `--appleid`：先在 iCloud 登录（`--region cn` → `https://www.icloud.com.cn/`），必填 cookie 齐后再打开设置页 `https://www.icloud.com.cn/settings/`（debug 里第一次看到 Apple 账户邮箱的页面）。没有 `appleid.apple.com.cn`。
+11. 浏览器 cookie 写入 `db/cookie/<账户>.json`，下次 `cookie-login` 自动注入；`--debug` 时每次变化再记一份 `db/cookie/<账户>/<时间>-<host>.json`。`--no-reuse-session` 可关掉。
+12. 过程写入 `logs/cookie-login-...log`（脱敏，不含完整 cookie / 验证码）。
 
 ```bash
 python main.py accounts          # 确认 hme_ok=True
@@ -207,8 +229,8 @@ python main.py accounts          # 确认 hme_ok=True
 | `--region us` / `--suffix com` | 国际站 | `icloud.com` |
 
 ```bat
-python main.py cookie-login -a maohongwei003@icloud.com --region cn --debug --keep-open 1200
-python main.py generate -a maohongwei003@icloud.com --region cn
+python main.py cookie-login -a user003@icloud.com --region cn --debug --keep-open 1200
+python main.py generate -a user003@icloud.com --region cn
 python main.py web --region cn
 ```
 
@@ -270,7 +292,8 @@ cookie: "X-APPLE-...; ..."
 | 字段 | 含义 | 用途 |
 |------|------|------|
 | `mail` | 账户主标识（母号） | 文件名建议一致；HME/DB 账户名 |
-| `apple.appleid` | Apple ID 登录邮箱 | 可与 `mail` 不同 |
+| `apple.appleid` | Apple ID 网页登录邮箱 | 可与 `mail` 不同；不作为 iCloud IMAP 用户名 |
+| `apple.mail` | Apple IMAP 用户名（可选） | 缺省使用根级 `mail`，通常为 `@icloud.com` 地址 |
 | `apple.app_password` | App 专用密码 | iCloud IMAP/SMTP |
 | `apple.cookie` | icloud.com Cookie | HME Web API |
 | `163mail.mail` / `imap` | 163 邮箱 + 授权码 | 后续多邮箱收信（已解析入库） |
@@ -278,6 +301,7 @@ cookie: "X-APPLE-...; ..."
 
 - 用不到的块**整段删掉**即可（缩减格式）。
 - 后续可同样增加 `qqmail` / `gmail` 等块（`*mail` 或登记 provider 名）。
+- `inbox.mail` 命中已配置的 provider 时使用该 provider；全账号自动收信会跳过缺少对应 IMAP 密码的账号。
 - `cookie` 含 `:` `;` `=` 时**建议双引号**。  
   必填键：`X-APPLE-WEBAUTH-TOKEN`、`X-APPLE-WEBAUTH-USER`、`X-APPLE-DS-WEB-SESSION-TOKEN`、`X-APPLE-WEBAUTH-LOGIN`。
 
@@ -287,27 +311,27 @@ cookie: "X-APPLE-...; ..."
 
 ### 新增账户（示例：003）
 
-现有号是 `maohongwei001` / `002` / `004`。加 **003** 不用改代码，丢一个 YAML 再采 cookie 即可。Web 会按文件 mtime 自动重载，**不必为加号重启服务**。
+已有 `user001` / `user002` / `user004` 时，加 **user003** 不用改代码，增加一个 YAML 再采 cookie 即可。Web 会按文件 mtime 自动重载，**不必为加号重启服务**。
 
 **1. 复制模板**
 
 ```bat
-copy accounts\_example.yaml.example accounts\maohongwei003@icloud.com.yaml
+copy accounts\_example.yaml.example accounts\user003@icloud.com.yaml
 ```
 
 **2. 先写成最小可用稿**（cookie 先留空，下一步有头登录会写回去）
 
 ```yaml
-mail: maohongwei003@icloud.com
+mail: user003@icloud.com
 apple:
-  appleid: maohongwei003@icloud.com
+  appleid: user003@icloud.com
   app_password: xxxx-xxxx-xxxx-xxxx
   cookie: ""
 ```
 
 | 必填 | 填什么 |
 |------|--------|
-| 文件名 | 与 `mail` 一致：`accounts/maohongwei003@icloud.com.yaml` |
+| 文件名 | 与 `mail` 一致：`accounts/user003@icloud.com.yaml` |
 | `mail` | 母号 / 账户名，生产、配额、打标都按这个认 |
 | `apple.appleid` | 真正用来登 iCloud 的 Apple ID，可以和 `mail` 不同 |
 | `apple.app_password` | [appleid.apple.com](https://appleid.apple.com) 生成的 App 专用密码；只要收信就填 |
@@ -315,27 +339,31 @@ apple:
 
 只要 HME、暂不收信：`app_password` 可以先不填。要 163 收信就再加 `163mail` / `inbox` 块，格式同上。
 
-**3. 有头采集 Cookie（含 2FA）**
+**3. 采集 Cookie 与转发邮箱（首次登录含 2FA）**
 
 ```bat
-python main.py cookie-login -a maohongwei003@icloud.com
-python main.py cookie-login -a maohongwei003@icloud.com --keep-open 180
+python main.py cookie-login -a user003@icloud.com
+python main.py cookie-login -a user003@icloud.com --keep-open 180
 ```
 
+如果 `-a` 指定的邮箱尚不存在，`cookie-login` 会在 `accounts/` 自动创建最小
+YAML；`--region cn` 会同时写入 `apple.domain: icloud.com.cn`，无需先复制模板。
+
 弹出 Camoufox 后在浏览器里登录；验证码也在页面里输。必填 Cookie 齐了会写回 YAML，并清掉该号的 `COOKIE_INVALID` 标记。`--keep-open 180` 表示写回后再把窗口挂 180 秒，方便核对登录态。中国区加 `--region cn`（或 `--suffix cn` / `--suffix com.cn`），打开的是 `https://www.icloud.com.cn`。
+已有 `db/cookie/` 会话后可加 `--headless`，脚本会无头刷新 Cookie、读取当前“转发至”邮箱并回填 `inbox.mail`。
 
 **4. 确认进池子**
 
 ```bat
 python main.py accounts
-python main.py quota -a maohongwei003@icloud.com
+python main.py quota -a user003@icloud.com
 produce.bat --list
 ```
 
 `hme_ok=True`、`cookie_invalid=false` 才能生产。然后：
 
 ```bat
-produce.bat -a maohongwei003@icloud.com
+produce.bat -a user003@icloud.com
 produce.bat --all --forever
 ```
 
@@ -344,7 +372,7 @@ produce.bat --all --forever
 **5. Cookie 又 421 了**
 
 ```bat
-python main.py cookie-login -a maohongwei003@icloud.com
+python main.py cookie-login -a user003@icloud.com
 ```
 
 失效号会被打标，再生产立刻 `409 COOKIE_INVALID`，`--all` 自动跳过。
@@ -366,8 +394,10 @@ start_web.bat 8771
 
 | 页面 | 地址 | 用途 |
 |------|------|------|
-| 邮箱池 | `http://127.0.0.1:8770/` | 账户、隐私邮箱、分类邮件与正文详情 |
+| 首页 | `http://127.0.0.1:8770/` | 本地工作台入口；预留后续账号登录系统 |
+| 邮箱池 | `http://127.0.0.1:8770/mailbox` | 账户、隐私邮箱、分类邮件与正文详情 |
 | 生产 | `http://127.0.0.1:8770/production` | 按 iCloud 账户生产 HME、查看配额和任务 |
+| 轮询生产 | `http://127.0.0.1:8770/production-loop` | 勾选账号后顺序循环生产，支持无限或定时运行 |
 | API 文档 | `http://127.0.0.1:8770/api/docs` | OpenAPI 交互文档 |
 
 生产页参数：
@@ -378,6 +408,17 @@ start_web.bat 8771
 | 生产接口 | `legacy`：旧版接口（每小时5个，间隔13–15分钟） |
 | 生产数量 | 旧版接口单次只能 `1` 个；间隔未到时剩余为 0 |
 | 并发线程 | `1-5`；每个线程使用独立 Apple 会话 |
+
+轮询生产页与 `produce.bat --all --loop/--forever` 的行为一致：
+
+| 项目 | 轮询规则 |
+|------|----------|
+| 账号选择 | 首次默认全部不参与；勾选结果写入 SQLite，运行中修改会在下一轮生效 |
+| 执行方式 | 后端独立单线程按列表顺序执行；每个账号固定提交 `legacy / count=1 / threads=1` |
+| 任务轮询 | 每 2 秒查询当前生产任务，完成后再处理下一个账号；关闭浏览器页面不影响线程 |
+| 限流等待 | 429 时记录本轮最短 `retry_after`，继续扫描其他账号，整轮结束后统一等待 |
+| 运行模式 | 支持无限运行和指定分钟数；停止时等待当前任务结束，不再提交下一个账号 |
+| 持久化恢复 | 配置、计数和最近 200 条日志写入 `production_loop_state`；Web 服务重启后自动恢复启用中的轮询 |
 
 页面打开后会调用 `POST /api/client-sync/open`：登记当前客户端、读取生产任务与配额快照，并自动提交一次全账户增量收信。多个客户端同时打开时，相同范围的运行中收信任务会去重。
 
@@ -398,6 +439,10 @@ start_web.bat 8771
 | `POST` | `/api/production` | 提交生产任务 |
 | `GET` | `/api/production/jobs` | 查询持久化生产历史 |
 | `GET` | `/api/production/jobs/{job_id}` | 查询一个生产任务 |
+| `GET` | `/api/production-loop` | 查询轮询配置、账号、配额与运行状态 |
+| `PUT` | `/api/production-loop/config` | 保存参与账号和无限/定时配置 |
+| `POST` | `/api/production-loop/start` | 启动后端轮询线程 |
+| `POST` | `/api/production-loop/stop` | 当前任务结束后停止轮询 |
 | `POST` | `/api/client-sync/open` | 客户端打开同步快照与自动收信 |
 
 独立 curl 客户端（不参与风控，配额仍由 Python 服务执行）：
@@ -513,6 +558,7 @@ CDK_xxx  →  {
 |----|------|
 | `create_claims` | 创建前原子占位；防止多线程同时越过每小时上限 |
 | `production_jobs` | 持久化生产任务、进度、结果和错误 |
+| `production_loop_state` | 轮询账号选择、运行状态、计数、截止时间和最近日志 |
 | `client_sync_state` | 记录多客户端最近打开时间 |
 | `mails` | 邮件元数据和分类结果；正文不落库 |
 | `mail_sync_state` | 每账户、每目录的增量 UID 水位 |
@@ -595,6 +641,8 @@ python main.py mail-probe -a user001@icloud.com
 python main.py mail-inbox -a user001@icloud.com -n 5
 python main.py mail-inbox -a user001@icloud.com --box Junk --no-body
 python main.py mail-get -a user001@icloud.com --uid 2
+python main.py mail-sync -a user001@icloud.com --full -v
+python main.py mail-export-codes
 python main.py mail-send -a user001@icloud.com --to someone@example.com --subject t --body hi
 ```
 
@@ -616,6 +664,7 @@ python main.py mail-send -a user001@icloud.com --to someone@example.com --subjec
 | `flags` / `size` / `attachments` | 标志 / 大小 / 附件元数据 |
 | `from_addr` / `sender_addr` | 展示发件地址 / 实际代发地址 |
 | `return_path_addr` | 信封退信地址（邮件投递失败时使用） |
+| `received_spf` / `envelope_from` | 完整 Received-SPF 头 / 从 SPF 或 Authentication-Results 抽取的信封发件地址 |
 
 ```python
 from tools.mail import get_mail_by_uid
@@ -670,6 +719,7 @@ with ICloudHMEClient(settings, acc.cookies) as client:
 |----------|------|------|------|
 | `apple` / `icloud` | `imap.mail.me.com:993` SSL | `smtp.mail.me.com:587` STARTTLS | App 专用密码 |
 | `163mail` / `163` | `imap.163.com:993` SSL | `smtp.163.com:465` SSL（失败回退 `587` STARTTLS） | 客户端授权码；LOGIN 后发 IMAP `ID`（防 Unsafe Login） |
+| `outlook` | Microsoft Graph `/v1.0` | Mail.Read 仅收件 | OAuth refresh token；收件箱 `inbox`，垃圾箱 `junkemail` |
 
 YAML 示例（163 作默认收件）：
 
@@ -687,6 +737,31 @@ inbox:
 
 文件夹：iCloud 常用 `INBOX` / `Junk` / …；163 的“垃圾邮件”等中文目录通过 IMAP modified UTF-7 返回。程序会解析 `LIST`、按 `\Junk` 或中文名识别目录，并在 `SELECT` 时使用真实编码箱名；数据库和 Web API 统一保存逻辑名 `Junk`。
 
+Outlook 授权文件与 YAML 放在同一 `accounts/` 目录。YAML 只声明默认收件地址：
+
+```yaml
+mail: user@icloud.com
+inbox:
+  mail: user@outlook.com
+```
+
+对应文件名为 `accounts/user@outlook.com.txt`，单行格式为：
+
+```text
+email----password----client_id----refresh_token
+```
+
+程序只在 Graph 请求时读取授权文件。找不到同名 TXT 时保留既有 Apple IMAP 回退；找到后自动切换 Outlook Graph。
+
+验证码 CSV：
+
+```powershell
+D:\0Code2\py312\python.exe main.py mail-export-codes
+D:\0Code2\py312\python.exe main.py mail-export-codes -o sava\verification_codes.csv
+```
+
+默认导出所有 `mail_type=code` 的记录，并包含 `code`、`summary`、地址、时间、`Received-SPF` 与 `envelope_from`。目标 CSV 写入前会移除只读属性，写入成功后设置为只读；Excel 持有文件锁时会自动短暂重试。
+
 ---
 
 ## tools 速查
@@ -697,16 +772,18 @@ inbox:
 | `accounts.py` | `Account` / `MailProvider`、多 provider YAML |
 | `logging_setup.py` | 采集日志 |
 | `camoufox_runtime.py` | 项目内 Camoufox 路径 / fetch |
-| `cookie_capture.py` | 有头登录采 cookie、写回 YAML |
+| `cookie_capture.py` | 有头/无头采 Cookie、读取转发邮箱并写回 YAML |
 | `client.py` | `ICloudHMEClient` |
 | `hme.py` | `HMEService`、`generate_cdk_label` |
 | `secure_random.py` | 跨平台 `secure_random_bytes` |
 | `db.py` | `AliasDB`：CDK 映射、配额、`resolve_cdk` |
 | `rate_limit.py` | `HME_CREATE_LIMIT_PER_HOUR=5` |
 | `mail.py` | 多 provider 邮件客户端、UTF-7、MIME、`type`/`summary`/`code` |
-| `mail_sync.py` | IMAP 增量同步、分类与元数据入库 |
+| `outlook_graph.py` | Outlook OAuth TXT 解析、Graph 正文读取与 delta 增量同步 |
+| `mail_sync.py` | IMAP UID / Graph 游标增量同步、分类与元数据入库 |
+| `mail_export.py` | 验证码 CSV 原子导出与只读属性管理 |
 | `production.py` | 按账户多线程生产 HME |
-| `web/` | FastAPI WebUI、生产页、后台任务和多端同步 API |
+| `web/` | FastAPI WebUI、单次/轮询生产页、后台任务和多端同步 API |
 
 ---
 

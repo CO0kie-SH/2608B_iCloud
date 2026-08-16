@@ -62,8 +62,12 @@ usage() {
 EOF
 }
 
+say() {
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"
+}
+
 log() {
-  printf '%s %s\n' "$(date '+[%Y-%m-%d %H:%M:%S]')" "$*" >>"$LOG"
+  printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >>"$LOG"
 }
 
 json_get() {
@@ -121,8 +125,8 @@ http_get() {
 health() {
   _code=$(curl -sS -m 5 "$BASE_URL/api/health" -o "$TMPDIR/health.json" -w '%{http_code}' || true)
   if [ "$_code" != "200" ]; then
-    echo "[ERR] 服务没起来: $BASE_URL  HTTP ${_code:-000}"
-    echo "      先跑 start_web.bat / python main.py web"
+    say "[ERR] 服务没起来: $BASE_URL  HTTP ${_code:-000}"
+    say "      先跑 start_web.bat / python main.py web"
     return 1
   fi
 }
@@ -130,7 +134,7 @@ health() {
 cmd_list() {
   health || return 1
   curl -sS -m 15 "$BASE_URL/api/production/options" -o "$TMPDIR/options.json"
-  echo "---------- 生产选项 ----------"
+  say "---------- 生产选项 ----------"
   cat "$TMPDIR/options.json"
   echo
 }
@@ -172,7 +176,7 @@ maybe_wait_rate() {
   is_looping || return 0
   if grep -q -i -e RATE_LIMIT -e rate_limited "$TMPDIR/job.json" 2>/dev/null; then
     _wait=$(json_retry "$(cat "$TMPDIR/job.json")")
-    echo "[NOTE] 服务风控 hint=${_wait}s，本轮继续扫其他账户"
+    say "[NOTE] 服务风控 hint=${_wait}s，本轮继续扫其他账户"
     note_wait "$_wait"
   fi
 }
@@ -187,7 +191,7 @@ produce_one() {
   _acc=$1
   SUBMITTED=$((SUBMITTED + 1))
   echo
-  echo "[POST] $_acc  interface=$INTERFACE  count=$COUNT  threads=$THREADS"
+  say "[POST] $_acc  interface=$INTERFACE  count=$COUNT  threads=$THREADS"
   log "POST account=$_acc interface=$INTERFACE count=$COUNT threads=$THREADS"
 
   printf '{"account":"%s","interface":"%s","count":%s,"threads":%s}\n' \
@@ -202,7 +206,7 @@ produce_one() {
 
   if [ "$_pcode" = "429" ]; then
     _ra=$(hdr_retry_after "$TMPDIR/resp.hdr")
-    echo "[429] 服务限流，Retry-After=${_ra}s"
+    say "[429] 服务限流，Retry-After=${_ra}s"
     log "429 account=$_acc retry_after=$_ra"
     FAILED_TOTAL=$((FAILED_TOTAL + 1))
     note_wait "$_ra"
@@ -210,14 +214,14 @@ produce_one() {
   fi
 
   if [ "$_pcode" = "409" ]; then
-    echo "[409] COOKIE_INVALID  $_acc 已标记失效，跳过"
+    say "[409] COOKIE_INVALID  $_acc 已标记失效，跳过"
     log "COOKIE_INVALID account=$_acc"
     FAILED_TOTAL=$((FAILED_TOTAL + 1))
     return 0
   fi
 
   if [ "$_pcode" != "202" ] && [ "$_pcode" != "200" ]; then
-    echo "[ERR] 提交失败 HTTP $_pcode"
+    say "[ERR] 提交失败 HTTP $_pcode"
     cat "$TMPDIR/resp.json"
     echo
     log "SUBMIT_FAIL http=$_pcode"
@@ -227,26 +231,26 @@ produce_one() {
 
   _job=$(json_get "$TMPDIR/resp.json" job_id)
   if [ -z "$_job" ]; then
-    echo "[ERR] 响应里没有 job_id"
+    say "[ERR] 响应里没有 job_id"
     cat "$TMPDIR/resp.json"
     echo
     FAILED_TOTAL=$((FAILED_TOTAL + 1))
     return 0
   fi
-  echo "[JOB] $_job  HTTP $_pcode"
+  say "[JOB] $_job  HTTP $_pcode"
 
   while :; do
     _jcode=$(curl -sS -m 20 "$BASE_URL/api/production/jobs/$_job" \
       -o "$TMPDIR/job.json" -w '%{http_code}' || true)
     if [ "$_jcode" != "200" ]; then
-      echo "[WARN] 查任务 HTTP ${_jcode:-000}，重试"
+      say "[WARN] 查任务 HTTP ${_jcode:-000}，重试"
       sleep 2
       continue
     fi
     _status=$(json_get "$TMPDIR/job.json" status)
     case "$_status" in
-      pending) echo "[..] $_job pending"; sleep 2; continue ;;
-      running) echo "[..] $_job running"; sleep 2; continue ;;
+      pending) say "[..] $_job pending"; sleep 2; continue ;;
+      running) say "[..] $_job running"; sleep 2; continue ;;
     esac
     break
   done
@@ -256,17 +260,17 @@ produce_one() {
   [ -n "$_created" ] || _created=0
 
   if [ "$_status" = "done" ]; then
-    echo "[OK] $_job created=$_created"
+    say "[OK] $_job created=$_created"
     if [ "$_created" -gt 0 ] 2>/dev/null; then
       json_hmes "$TMPDIR/job.json" | while IFS= read -r _hme; do
         [ -n "$_hme" ] || continue
-        echo "       + $_hme"
+        say "       + $_hme"
         log "CREATED $_hme"
       done
       CREATED_TOTAL=$((CREATED_TOTAL + _created))
     fi
     if [ -n "$_error" ]; then
-      echo "[NOTE] 部分失败: $_error"
+      say "[NOTE] 部分失败: $_error"
       FAILED_TOTAL=$((FAILED_TOTAL + 1))
       maybe_wait_rate
     fi
@@ -274,8 +278,8 @@ produce_one() {
     return 0
   fi
 
-  echo "[FAIL] $_job status=$_status created=$_created"
-  [ -n "$_error" ] && echo "       $_error"
+  say "[FAIL] $_job status=$_status created=$_created"
+  [ -n "$_error" ] && say "       $_error"
   log "FAIL job=$_job account=$_acc status=$_status created=$_created error=$_error"
   FAILED_TOTAL=$((FAILED_TOTAL + 1))
   maybe_wait_rate
@@ -301,7 +305,7 @@ while [ $# -gt 0 ]; do
       shift 2
       ;;
     --interval) INTERVAL=$2; shift 2 ;;
-    *) echo "[ERR] 未知参数: $1"; usage; exit 2 ;;
+    *) say "[ERR] 未知参数: $1"; usage; exit 2 ;;
   esac
 done
 
@@ -311,7 +315,7 @@ if [ "$DO_LIST" -eq 1 ]; then
 fi
 
 if [ "$DO_ALL" -eq 0 ] && [ -z "$ACCOUNT" ]; then
-  echo "[ERR] 必须指定 -a 账户，或使用 --all / --list"
+  say "[ERR] 必须指定 -a 账户，或使用 --all / --list"
   usage
   exit 2
 fi
@@ -319,10 +323,10 @@ fi
 health || exit 1
 
 if [ "$FOREVER" -eq 1 ]; then
-  echo "[INFO] 无限循环生产，接口=$INTERFACE，Ctrl+C 停止，日志=$LOG"
+  say "[INFO] 无限循环生产，接口=$INTERFACE，Ctrl+C 停止，日志=$LOG"
 elif [ "$LOOP_MIN" -gt 0 ]; then
   DEADLINE=$(( $(date +%s) + LOOP_MIN * 60 ))
-  echo "[INFO] 循环生产 ${LOOP_MIN} 分钟，接口=$INTERFACE，日志=$LOG"
+  say "[INFO] 循环生产 ${LOOP_MIN} 分钟，接口=$INTERFACE，日志=$LOG"
 fi
 
 while :; do
@@ -347,15 +351,15 @@ while :; do
   _sleepfor=$INTERVAL
   if [ "$NEXT_WAIT" -gt "$_sleepfor" ]; then
     _sleepfor=$NEXT_WAIT
-    echo "[WAIT] 本轮最短风控 ${_sleepfor}s，扫完再睡"
+    say "[WAIT] 本轮最短风控 ${_sleepfor}s，扫完再睡"
   fi
   sleep_chunked "$_sleepfor"
 done
 
 echo
-echo "========== 汇总 =========="
-echo "提交任务: $SUBMITTED"
-echo "成功生产: $CREATED_TOTAL"
-echo "失败条目: $FAILED_TOTAL"
-echo "日志: $LOG"
+say "========== 汇总 =========="
+say "提交任务: $SUBMITTED"
+say "成功生产: $CREATED_TOTAL"
+say "失败条目: $FAILED_TOTAL"
+say "日志: $LOG"
 [ "$CREATED_TOTAL" -gt 0 ]

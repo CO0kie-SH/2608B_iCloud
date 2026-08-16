@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from .config import env_tuple
+from .config import env_tuple, resolve_icloud_domain
 from .cookies import OPTIONAL_COOKIE_KEYS, REQUIRED_COOKIE_KEYS, missing_required_keys, parse_cookie_keys
 
 _YAML_SUFFIXES = {".yml", ".yaml"}
@@ -17,6 +17,7 @@ _YAML_SUFFIXES = {".yml", ".yaml"}
 PROVIDER_LABELS: dict[str, str] = {
     "apple": "Apple/iCloud",
     "163mail": "163",
+    "outlook": "Microsoft Outlook",
 }
 
 # provider 块名 → 该服务商负责的邮箱域名。
@@ -26,11 +27,13 @@ PROVIDER_LABELS: dict[str, str] = {
 _PROVIDER_DOMAIN_DEFAULTS: dict[str, tuple[str, ...]] = {
     "apple": ("icloud.com", "me.com", "mac.com"),
     "163mail": ("163.com", "126.com", "yeah.net", "vip.163.com"),
+    "outlook": ("outlook.com", "hotmail.com", "live.com", "msn.com"),
 }
 
 _PROVIDER_DOMAIN_ENV_KEYS: dict[str, str] = {
     "apple": "MAIL_APPLE_DOMAINS",
     "163mail": "MAIL_163_DOMAINS",
+    "outlook": "MAIL_OUTLOOK_DOMAINS",
 }
 
 
@@ -84,6 +87,8 @@ class MailProvider:
 
     @property
     def ready(self) -> bool:
+        if self.name == "outlook":
+            return bool(self.mail and self.extra.get("token_file"))
         return bool(self.mail and self.password)
 
 
@@ -112,6 +117,14 @@ class Account:
         ep = self.resolve_inbox()
         return ep is not None and ep.ready
 
+    @property
+    def icloud_domain(self) -> str:
+        """该账户 HME Cookie 所属的 iCloud Web 域名。"""
+        apple = self.providers.get("apple")
+        if not apple:
+            return ""
+        return (apple.extra.get("icloud_domain") or "").strip().lower()
+
     def get_provider(self, name: str) -> MailProvider | None:
         return self.providers.get(name)
 
@@ -138,13 +151,18 @@ class Account:
                     return p
             if ranked:
                 return ranked[0]
-            # inbox 写了地址但未匹配到块：用该地址 + apple 密码兜底（扁平/旧习惯）
-            if self.app_password:
+            # 163 等密码型 provider 缺授权时不套用 Apple 密码。Outlook 保留
+            # 历史兼容：只有发现同名 TXT 才切 Graph，否则仍回退 Apple IMAP。
+            if expected and expected not in {"apple", "outlook"}:
+                return None
+            # Apple 地址可继续兼容扁平 app_password 配置。
+            if expected == "apple" and self.app_password:
                 return MailProvider(
-                    name=expected or "apple",
+                    name="apple",
                     mail=self.inbox_mail,
                     password=self.app_password,
                 )
+            # 未登记的第三方转发地址只作为元数据；收件回退到可用的 Apple 邮箱。
 
         apple = self.providers.get("apple")
         if apple and apple.ready:
@@ -222,6 +240,79 @@ def resolve_account_files(raw: str, base_dir: Path) -> list[Path]:
     return paths
 
 
+def create_account_file(
+    accounts_files: str,
+    base_dir: Path,
+    account: str,
+    *,
+    domain: str,
+) -> tuple[Path, bool]:
+    """在账户目录中创建 cookie-login 所需的最小 YAML。"""
+    name = (account or "").strip().lower()
+    local, separator, mail_domain = name.rpartition("@")
+    invalid_path_chars = set('<>:"/\\|?*')
+    if (
+        name.count("@") != 1
+        or separator != "@"
+        or not local
+        or not mail_domain
+        or "." not in mail_domain
+        or local.startswith(".")
+        or local.endswith(".")
+        or ".." in name
+        or mail_domain.startswith(".")
+        or mail_domain.endswith(".")
+        or any(ch.isspace() or ch in invalid_path_chars for ch in name)
+    ):
+        raise ValueError(f"账户必须是有效邮箱地址: {account}")
+
+    account_dir: Path | None = None
+    for part in re.split(r"[,;]+", accounts_files or ""):
+        raw_path = part.strip().strip('"').strip("'")
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = base_dir / path
+        if path.is_dir() or path.suffix.lower() not in _YAML_SUFFIXES:
+            account_dir = path
+            break
+
+    if account_dir is None:
+        raise ValueError(
+            "ACCOUNTS_FILES 当前只配置了单个 YAML，请改为账户目录后再增加账号"
+        )
+
+    account_dir.mkdir(parents=True, exist_ok=True)
+    target = account_dir / f"{name}.yaml"
+    if target.exists():
+        return target, False
+
+    data = {
+        "mail": name,
+        "apple": {
+            "domain": resolve_icloud_domain(domain=domain),
+            "appleid": name,
+            "app_password": "",
+            "cookie": "",
+        },
+        "inbox": {"mail": name},
+    }
+    dumped = yaml.safe_dump(
+        data,
+        allow_unicode=True,
+        default_flow_style=False,
+        sort_keys=False,
+        width=10_000,
+    )
+    try:
+        with target.open("x", encoding="utf-8", newline="\n") as fh:
+            fh.write(dumped)
+    except FileExistsError:
+        return target, False
+    return target, True
+
+
 def _as_str(value: Any) -> str:
     if value is None:
         return ""
@@ -282,9 +373,13 @@ def _parse_apple_block(raw: dict[str, Any] | None) -> tuple[MailProvider | None,
     apple_id = _as_str(raw.get("appleid") or raw.get("apple_id"))
     app_password = _as_str(raw.get("app_password"))
     cookie = _as_str(raw.get("cookie"))
-    # apple 登录邮箱优先 appleid；可另写 mail
-    mail = _as_str(raw.get("mail")) or apple_id
+    # Apple ID 是网页登录身份，不等于 iCloud IMAP 用户名。
+    # apple.mail 可显式覆盖；缺省值稍后由根级 mail 补齐。
+    mail = _as_str(raw.get("mail"))
     extra = {"appleid": apple_id} if apple_id else {}
+    domain = _as_str(raw.get("domain") or raw.get("icloud_domain") or raw.get("region"))
+    if domain:
+        extra["icloud_domain"] = resolve_icloud_domain(domain=domain)
     if cookie:
         extra["cookie"] = cookie
     return (
@@ -342,6 +437,13 @@ def _extract_from_data(data: dict[str, Any]) -> tuple[
     apple_prov, apple_errs = _parse_apple_block(apple_raw)
     errors.extend(apple_errs)
     if apple_prov:
+        if not apple_prov.mail and root_mail:
+            apple_prov = MailProvider(
+                name="apple",
+                mail=root_mail,
+                password=apple_prov.password,
+                extra=apple_prov.extra,
+            )
         providers["apple"] = apple_prov
 
     # 其它 *mail 块（163mail、后续 qqmail…），排除 inbox
@@ -413,6 +515,20 @@ def _extract_from_data(data: dict[str, Any]) -> tuple[
         )
 
     return root_mail, apple_id, app_password, cookies, inbox_mail, providers, errors
+
+
+def _find_outlook_token_file(directory: Path, mail: str) -> Path | None:
+    """按 inbox.mail 匹配同目录 TXT 授权文件，Windows/大小写均兼容。"""
+    target = (mail or "").strip().lower()
+    if not target or provider_for_domain(target) != "outlook":
+        return None
+    exact = directory / f"{target}.txt"
+    if exact.is_file():
+        return exact.resolve()
+    for path in directory.glob("*.txt"):
+        if path.stem.strip().lower() == target:
+            return path.resolve()
+    return None
 
 
 def parse_accounts_file(path: Path) -> list[Account]:
@@ -505,6 +621,17 @@ def parse_accounts_file(path: Path) -> list[Account]:
         data
     )
     format_errors = list(extract_errors)
+
+    # Outlook 使用 OAuth refresh token；YAML 只声明 inbox.mail，授权文件沿用
+    # <邮箱>.txt 的四列格式并保持独立，避免把 token 复制到 YAML。
+    if inbox_mail and "outlook" not in providers:
+        token_file = _find_outlook_token_file(path.parent, inbox_mail)
+        if token_file:
+            providers["outlook"] = MailProvider(
+                name="outlook",
+                mail=inbox_mail.strip().lower(),
+                extra={"token_file": str(token_file)},
+            )
 
     mail = root_mail
     if not mail:

@@ -7,7 +7,7 @@ Web 响应模型。
 绝不允许出现在任何响应里。
 """
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -95,6 +95,8 @@ class MailOut(BaseModel):
     from_addr: str
     sender_addr: str
     return_path: str
+    received_spf: str = ""
+    envelope_from: str = ""
     is_relayed: bool
     relay_label: str
     to_addr: str
@@ -149,6 +151,14 @@ class SyncJobOut(BaseModel):
     error: str = ""
 
 
+class ProductionLoopConfigIn(BaseModel):
+    selected_accounts: list[str] = []
+    interface: Literal["legacy"] = "legacy"
+    mode: Literal["forever", "timed"] = "forever"
+    duration_minutes: int = 0
+    interval_sec: int = 2
+
+
 def alias_to_out(
     rec: Any,
     *,
@@ -187,6 +197,8 @@ def mail_to_out(rec: Any) -> MailOut:
         from_addr=d["from_addr"],
         sender_addr=d["sender_addr"],
         return_path=d["return_path"],
+        received_spf=d.get("received_spf") or "",
+        envelope_from=d.get("envelope_from") or "",
         is_relayed=d["is_relayed"],
         relay_label=d["relay_label"],
         to_addr=d["to_addr"],
