@@ -134,6 +134,13 @@ class MailStatsOut(BaseModel):
     mailbox_labels: dict[str, str] = dict(MAILBOX_LABELS)
 
 
+class HomePoolStatsOut(BaseModel):
+    total: int
+    available: int
+    cdk_total: int
+    cdk_available: int
+
+
 class MailDetailOut(BaseModel):
     meta: MailOut
     body_text: str = ""

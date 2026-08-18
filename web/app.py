@@ -7,10 +7,11 @@ from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from web.deps import get_settings, web_dir
+from web.deps import get_db, get_settings, web_dir
 from web.errors import register_error_handlers
 from web.production_loop import get_production_loop_controller
 from web.routers import accounts, aliases, client_sync, groups, mailcom, mails, production, production_loop, sync
+from web.schemas import HomePoolStatsOut
 
 
 def create_app() -> FastAPI:
@@ -85,6 +86,10 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict[str, object]:
         return {"ok": True, "app": settings.app_name}
+
+    @app.get("/api/home/stats", response_model=HomePoolStatsOut)
+    def home_stats() -> HomePoolStatsOut:
+        return HomePoolStatsOut(**get_db().get_alias_pool_stats())
 
     return app
 

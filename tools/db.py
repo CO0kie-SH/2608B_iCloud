@@ -1192,6 +1192,31 @@ class AliasDB:
                 ).fetchall()
         return [self._row_to_record(r) for r in rows]
 
+    def get_alias_pool_stats(self) -> dict[str, int]:
+        """返回首页号池概览，CDK_ 按标签前缀区分。"""
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN is_active != 0 THEN 1 ELSE 0 END), 0) AS available,
+                    COALESCE(SUM(CASE
+                        WHEN substr(upper(trim(COALESCE(label, ''))), 1, 4) = 'CDK_'
+                        THEN 1 ELSE 0 END), 0) AS cdk_total,
+                    COALESCE(SUM(CASE
+                        WHEN is_active != 0
+                         AND substr(upper(trim(COALESCE(label, ''))), 1, 4) = 'CDK_'
+                        THEN 1 ELSE 0 END), 0) AS cdk_available
+                FROM aliases
+                """
+            ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "available": int(row["available"] or 0),
+            "cdk_total": int(row["cdk_total"] or 0),
+            "cdk_available": int(row["cdk_available"] or 0),
+        }
+
     # ---------- CDK 查询 API ----------
 
     def get_by_cdk(self, cdk: str) -> AliasRecord | None:

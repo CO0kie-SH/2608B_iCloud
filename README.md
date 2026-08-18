@@ -6,9 +6,22 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.8.16C** |
+| **版本** | **26.8.18A** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
-| **最后更新** | 2026-08-16 |
+| **最后更新** | 2026-08-18 |
+
+---
+
+## 版本 26.8.18A 变更摘要
+
+| 模块 | 变更 |
+|------|------|
+| 首页号池 | `/` 增加四格统计：号池总数、可用隐私数、`CDK_` 总数、`CDK_` 可用数 |
+| 接口 | `GET /api/home/stats` 从本地 SQLite 汇总，不读账户 YAML |
+| 前端 | `web/static/home.js` 打开首页时拉最新值；加载失败保留 `--` |
+| 测试 | `tests/test_home_stats.py` 覆盖空池与 `CDK_` 前缀计数 |
+
+**升级注意：** 无数据库迁移。刷新首页即可看到统计。
 
 ---
 
@@ -109,7 +122,7 @@ python main.py quota -a user001@icloud.com
 | 限流 | 1 小时 5 个创建硬限制 + 配额查询 |
 | 安全随机 | 按 OS 切换：Linux `getrandom`/`urandom`，Windows/macOS `secrets` |
 | 邮件 | IMAP/SMTP；`type`/`summary`/`code`；按 UID 取 JSON |
-| WebUI | 邮箱池、邮件分类、文本/HTML详情、后台增量同步 |
+| WebUI | 首页号池统计、邮箱池、邮件分类、文本/HTML详情、后台增量同步 |
 | 生产 | 单次生产页 + 独立轮询页；按账号控制参与范围，任务进度与结果持久化 |
 | 多客户端 | 打开即同步；生产历史、配额和邮件状态以服务器 SQLite 为准 |
 | Cookie 采集 | Camoufox **有头**登录 iCloud → 写回 `apple.cookie`（2FA 在浏览器完成） |
@@ -147,7 +160,7 @@ python main.py quota -a user001@icloud.com
 │   ├── production_loop.py      # 持久化单线程轮询控制器
 │   ├── production_service.py   # 单次/轮询共用的生产提交入口
 │   ├── routers/                # Web API
-│   ├── static/                 # 邮箱池、生产页、设置
+│   ├── static/                 # 首页统计、邮箱池、生产页、设置
 │   └── templates/              # HTML 页面
 └── tools/
     ├── config.py                # .env → Settings；区域 cn/us
