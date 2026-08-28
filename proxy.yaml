@@ -1,0 +1,23 @@
+# 本地代理与项目变量配置（可选）。
+# 非空值优先于 .env；留空项会回退到 .env 或系统环境变量。
+# 代理协议支持 http://、https://、socks5://、socks5h://。
+
+project:
+  # app_name: 2608B_iCloud
+  # accounts_files: accounts/
+  # log_dir: logs
+  # client_build: 2610Hotfix23
+  # client_id: 37bd9669-50c3-4d52-af42-1d240d3ac4f3
+
+proxy:
+  # HME API：先直连，传输失败时再使用该代理；none/off/direct 强制纯直连。
+  hme_proxy: ""
+  # Camoufox 浏览器与下载代理。
+  camoufox_proxy: ""
+  # mail.com 收件代理。
+  mailcom_proxy: ""
+  # 可选全局兜底代理，HME_PROXY 留空时按 HTTPS/HTTP/ALL 使用。
+  http_proxy: ""
+  https_proxy: ""
+  all_proxy: ""
+  no_proxy: ""

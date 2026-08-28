@@ -133,7 +133,6 @@ class HMEService:
             f"remaining={quota.remaining}"
         )
 
-        event_recorded = False
         try:
             gen: dict[str, Any] = {}
             for attempt in range(3):
@@ -189,16 +188,8 @@ class HMEService:
                     raw=res if isinstance(res, dict) else None,
                 )
 
-            # 成功后记账（限流）+ 写入 aliases（CDK -> 隐私邮箱 + 母号）
+            # 先完成本地别名落库；只有整条生产结果可持久化时才写冷却记账。
             cdk = alias.label if str(alias.label).startswith("CDK_") else label
-            created_at = store.record_create_event(
-                account,
-                hme=alias.hme,
-                label=alias.label,
-                cdk=cdk,
-                parent_mail=account,
-            )
-            event_recorded = True
             store.upsert_alias(
                 account=account,
                 parent_mail=account,
@@ -212,11 +203,16 @@ class HMEService:
                 source="generate",
                 raw=alias.raw,
             )
+            created_at = store.record_create_event(
+                account,
+                hme=alias.hme,
+                label=alias.label,
+                cdk=cdk,
+                parent_mail=account,
+            )
         finally:
-            # reserve 已成功但本地记账失败时保留 claim 一小时，避免上游已创建
-            # 而本地配额回退，导致后续请求越过真实限制。
-            if event_recorded:
-                store.release_create_claim(claim_id)
+            # claim 只用于并发占位；只有 create_events 中的成功记录才能产生冷却。
+            store.release_create_claim(claim_id)
         quota = store.get_create_quota(account)
         print(
             f"[rate-limit] recorded create_event at {created_at} for {alias.hme} "

@@ -51,6 +51,41 @@ function fmtServer(value) {
   return window.UiSettings.formatServerTime(value, { withSeconds: true }) || "-";
 }
 
+function networkMeta(job) {
+  const summary = job?.result?.network_summary || {};
+  const reports = Array.isArray(job?.result?.network) ? job.result.network : [];
+  const routes = new Set(reports.map((item) => String(item?.route || "")).filter(Boolean));
+  const summaryRoute = String(summary.route || "");
+  let label = summaryRoute === "direct" ? "直连"
+    : summaryRoute === "proxy" ? "代理"
+      : summaryRoute === "direct_then_proxy" ? "直连失败 → 代理兜底"
+        : "未记录";
+  let className = "tag-muted";
+  if (routes.has("direct_then_proxy") || (routes.has("direct") && routes.has("proxy"))) {
+    label = "直连失败 → 代理兜底";
+    className = "tag-network-proxy";
+  } else if (routes.has("proxy")) {
+    label = "代理";
+    className = "tag-network-proxy";
+  } else if (routes.has("direct")) {
+    label = "直连";
+    className = "tag-network-direct";
+  }
+  if (summaryRoute === "direct") className = "tag-network-direct";
+  if (summaryRoute === "proxy" || summaryRoute === "direct_then_proxy") className = "tag-network-proxy";
+  const successful = Number(summary.successful_attempts) || reports.reduce((sum, item) => sum + (Number(item?.successful_attempts) || 0), 0);
+  const failed = Number(summary.failed_attempts) || reports.reduce((sum, item) => sum + (Number(item?.failed_attempts) || 0), 0);
+  const hasReport = Boolean(summaryRoute) || reports.length > 0;
+  return [label, className, hasReport ? `（网络成功 ${successful} / 失败 ${failed} 次）` : ""];
+}
+
+function jobOutcome(job) {
+  if (!job || job.status === "pending" || job.status === "running") return ["进行中", "tag-running"];
+  const errors = Array.isArray(job.result?.errors) ? job.result.errors : [];
+  if (Number(job.result?.created || 0) > 0 && errors.length) return ["部分成功", "tag-network-partial"];
+  return job.status === "done" ? ["成功", "tag-ok"] : ["失败", "tag-danger"];
+}
+
 function statusMeta(status) {
   return ({
     running: ["运行中", "tag-running"],
@@ -100,20 +135,25 @@ function renderAccounts(snapshot) {
   const selected = new Set(loopState.selectionDraft ?? snapshot.selected_accounts ?? []);
   const rows = byId("loopAccountRows");
   rows.innerHTML = (snapshot.accounts || []).map((account) => {
-    const ready = account.hme_ok && !account.cookie_invalid;
-    const status = ready ? "可用" : "Cookie 无效";
+    const aliasCount = Math.max(0, Number(account.alias_count) || 0);
+    const aliasPending = Math.max(0, Number(account.alias_pending) || 0);
+    const aliasLimit = Math.max(1, Number(account.alias_limit) || 740);
+    const limitReached = Boolean(account.alias_limit_reached || aliasCount >= aliasLimit);
+    const ready = account.hme_ok && !account.cookie_invalid && !limitReached;
+    const status = limitReached ? `已达 ${aliasLimit} 上限` : ready ? "可用" : "Cookie 无效";
     const statusClass = ready ? "account-ready" : "account-blocked";
     return `<tr>
-      <td class="loop-check-col"><input type="checkbox" data-loop-account value="${escapeHtml(account.name)}" ${selected.has(account.name) ? "checked" : ""} aria-label="${escapeHtml(account.name)} 参与生产"></td>
+      <td class="loop-check-col"><input type="checkbox" data-loop-account value="${escapeHtml(account.name)}" ${ready && selected.has(account.name) ? "checked" : ""} ${ready ? "" : "disabled"} aria-label="${escapeHtml(account.name)} 参与生产"></td>
       <td><b>${escapeHtml(account.name)}</b><small>${escapeHtml(account.mail || "")}</small></td>
       <td><span class="${statusClass}">${status}</span></td>
+      <td>${aliasCount}/${aliasLimit}${aliasPending ? ` + ${aliasPending} 在途` : ""}</td>
       <td>${Number(account.quota_used) || 0}/${Number(account.quota_limit) || 5}</td>
       <td>${Math.max(0, Number(account.quota_remaining) || 0)}</td>
       <td>${escapeHtml(fmtUnix(account.last_produce_at))}</td>
       <td>${escapeHtml(fmtUnix(account.next_produce_at))}</td>
     </tr>`;
-  }).join("") || '<tr><td colspan="7" class="empty">暂无账号</td></tr>';
-  byId("loopSelectionCount").textContent = `${selected.size} 个`;
+  }).join("") || '<tr><td colspan="8" class="empty">暂无账号</td></tr>';
+  byId("loopSelectionCount").textContent = `${selectedFromDom().length} 个`;
   rows.querySelectorAll("[data-loop-account]").forEach((input) => {
     input.addEventListener("change", () => {
       loopState.selectionDraft = selectedFromDom();
@@ -131,6 +171,8 @@ function renderRuntime(snapshot) {
   byId("loopRound").textContent = `第 ${Number(snapshot.round_no) || 0} 轮`;
   byId("loopCurrentAccount").textContent = snapshot.current_account || "-";
   byId("loopCurrentJob").textContent = snapshot.current_job_id || "-";
+  byId("loopLastAccount").textContent = snapshot.last_account || "-";
+  byId("loopLastJob").textContent = snapshot.last_job_id || "-";
   byId("loopStartedAt").textContent = fmtServer(snapshot.started_at);
   byId("loopDeadline").textContent = snapshot.deadline_at ? fmtUnix(snapshot.deadline_at) : "无限";
   byId("loopNextRun").textContent = snapshot.next_run_at ? fmtUnix(snapshot.next_run_at) : "-";
@@ -139,9 +181,15 @@ function renderRuntime(snapshot) {
   byId("loopFailed").textContent = Number(snapshot.failed) || 0;
   byId("loopSkipped").textContent = Number(snapshot.skipped) || 0;
 
-  const job = snapshot.current_job;
+  const job = snapshot.current_job || snapshot.last_job;
+  const isCurrent = Boolean(snapshot.current_job);
+  const outcome = jobOutcome(job);
+  const network = networkMeta(job);
+  byId("loopLastNetwork").textContent = snapshot.last_job ? networkMeta(snapshot.last_job)[0] : "-";
+  byId("loopLastOutcome").textContent = snapshot.last_job ? jobOutcome(snapshot.last_job)[0] : "-";
   byId("loopJobProgress").innerHTML = job ? `
-    <div class="job-head"><b>${escapeHtml(job.account || snapshot.current_account)}</b><span class="tag tag-running">${escapeHtml(job.status)}</span></div>
+    <div class="job-head"><b>${isCurrent ? "当前" : "最近"}：${escapeHtml(job.account || snapshot.current_account || snapshot.last_account)}</b><span class="tag ${outcome[1]}">${escapeHtml(outcome[0])}</span></div>
+    <div class="job-network"><span class="tag ${network[1]}">网络：${escapeHtml(network[0] + network[2])}</span></div>
     <div class="job-progress">${(job.progress || []).slice(-4).map((line) => escapeHtml(window.UiSettings.shiftLeadingUtcStamp(line))).join("<br>")}</div>
   ` : "";
 
@@ -223,7 +271,7 @@ async function stopLoop() {
 
 async function setSelection(names) {
   document.querySelectorAll("[data-loop-account]").forEach((item) => {
-    item.checked = names.has(item.value);
+    item.checked = !item.disabled && names.has(item.value);
   });
   await saveConfig([...names]);
 }
@@ -238,7 +286,11 @@ byId("loopForm").addEventListener("submit", startLoop);
 byId("loopStop").addEventListener("click", stopLoop);
 byId("loopRefresh").addEventListener("click", () => refresh());
 byId("loopSelectReady").addEventListener("click", () => {
-  const ready = new Set((loopState.snapshot?.accounts || []).filter((item) => item.hme_ok && !item.cookie_invalid).map((item) => item.name));
+  const ready = new Set((loopState.snapshot?.accounts || []).filter((item) => {
+    const count = Math.max(0, Number(item.alias_count) || 0);
+    const limit = Math.max(1, Number(item.alias_limit) || 740);
+    return item.hme_ok && !item.cookie_invalid && !item.alias_limit_reached && count < limit;
+  }).map((item) => item.name));
   setSelection(ready).catch(() => {});
 });
 byId("loopClearSelection").addEventListener("click", () => {

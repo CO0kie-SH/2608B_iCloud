@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .rate_limit import (
+    HME_ACCOUNT_ALIAS_LIMIT,
     HME_CREATE_LIMIT_PER_HOUR,
     HME_CREATE_MAX_INTERVAL_SECONDS,
     HME_CREATE_MIN_INTERVAL_SECONDS,
     HME_CREATE_WINDOW_SECONDS,
+    HMEAccountAliasLimitError,
     HMECreateRateLimitError,
     pick_create_interval_seconds,
 )
@@ -162,6 +164,7 @@ class MailRecord:
     fetched_at: str
     created_at: str
     updated_at: str
+    body_text: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -198,6 +201,19 @@ class CreateQuota:
     next_produce_at: int = 0
     interval_min_sec: int = HME_CREATE_MIN_INTERVAL_SECONDS
     interval_max_sec: int = HME_CREATE_MAX_INTERVAL_SECONDS
+
+    @property
+    def allowed(self) -> bool:
+        return self.remaining > 0
+
+
+@dataclass
+class AliasCapacity:
+    account: str
+    alias_count: int
+    pending: int
+    limit: int
+    remaining: int
 
     @property
     def allowed(self) -> bool:
@@ -415,6 +431,8 @@ class AliasDB:
                     deadline_at INTEGER NOT NULL DEFAULT 0,
                     current_account TEXT NOT NULL DEFAULT '',
                     current_job_id TEXT NOT NULL DEFAULT '',
+                    last_account TEXT NOT NULL DEFAULT '',
+                    last_job_id TEXT NOT NULL DEFAULT '',
                     next_run_at INTEGER NOT NULL DEFAULT 0,
                     round_no INTEGER NOT NULL DEFAULT 0,
                     submitted INTEGER NOT NULL DEFAULT 0,
@@ -434,6 +452,15 @@ class AliasDB:
                 """,
                 (utc_now(),),
             )
+            loop_cols = self._table_columns(conn, "production_loop_state")
+            if "last_account" not in loop_cols:
+                conn.execute(
+                    "ALTER TABLE production_loop_state ADD COLUMN last_account TEXT NOT NULL DEFAULT ''"
+                )
+            if "last_job_id" not in loop_cols:
+                conn.execute(
+                    "ALTER TABLE production_loop_state ADD COLUMN last_job_id TEXT NOT NULL DEFAULT ''"
+                )
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS client_sync_state (
@@ -566,6 +593,10 @@ class AliasDB:
             if "received_spf" not in mail_cols:
                 conn.execute(
                     "ALTER TABLE mails ADD COLUMN received_spf TEXT NOT NULL DEFAULT ''"
+                )
+            if "body_text" not in mail_cols:
+                conn.execute(
+                    "ALTER TABLE mails ADD COLUMN body_text TEXT NOT NULL DEFAULT ''"
                 )
 
             # ---------- 增量收取水位 ----------
@@ -767,6 +798,18 @@ class AliasDB:
                 "SELECT claim_id, claimed_at FROM create_claims WHERE account = ? AND claimed_at >= ?",
                 (account, since_s),
             ).fetchall()
+            alias_row = conn.execute(
+                "SELECT COUNT(*) AS total FROM aliases WHERE account = ? OR parent_mail = ?",
+                (account, account),
+            ).fetchone()
+            alias_count = int(alias_row["total"] or 0)
+            if alias_count + len(active) >= HME_ACCOUNT_ALIAS_LIMIT:
+                raise HMEAccountAliasLimitError(
+                    account,
+                    alias_count,
+                    HME_ACCOUNT_ALIAS_LIMIT,
+                    pending=len(active),
+                )
             used = len(events) + len(active)
             next_at = 0
             if last:
@@ -809,6 +852,13 @@ class AliasDB:
         with self._connect() as conn:
             conn.execute("DELETE FROM create_claims WHERE claim_id = ?", (claim_id,))
             conn.commit()
+
+    def release_all_create_claims(self) -> int:
+        """服务启动时清理上个进程遗留的临时并发占位。"""
+        with self._connect() as conn:
+            cursor = conn.execute("DELETE FROM create_claims")
+            conn.commit()
+        return max(0, int(cursor.rowcount or 0))
 
     def get_create_quota(
         self,
@@ -981,6 +1031,8 @@ class AliasDB:
             "deadline_at",
             "current_account",
             "current_job_id",
+            "last_account",
+            "last_job_id",
             "next_run_at",
             "round_no",
             "submitted",
@@ -1165,6 +1217,59 @@ class AliasDB:
                 next_produce_at=q.next_produce_at,
             )
         return q
+
+    def count_aliases(self, account: str | None = None) -> int:
+        with self._connect() as conn:
+            if account:
+                row = conn.execute(
+                    "SELECT COUNT(*) AS total FROM aliases WHERE account = ? OR parent_mail = ?",
+                    (account, account),
+                ).fetchone()
+            else:
+                row = conn.execute("SELECT COUNT(*) AS total FROM aliases").fetchone()
+        return int(row["total"] or 0)
+
+    def get_alias_capacity(
+        self,
+        account: str,
+        limit: int = HME_ACCOUNT_ALIAS_LIMIT,
+    ) -> AliasCapacity:
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        since_s = (
+            utc_now_dt() - timedelta(seconds=HME_CREATE_WINDOW_SECONDS)
+        ).strftime("%Y-%m-%d %H:%M:%S")
+        with self._connect() as conn:
+            alias_row = conn.execute(
+                "SELECT COUNT(*) AS total FROM aliases WHERE account = ? OR parent_mail = ?",
+                (account, account),
+            ).fetchone()
+            pending_row = conn.execute(
+                "SELECT COUNT(*) AS total FROM create_claims WHERE account = ? AND claimed_at >= ?",
+                (account, since_s),
+            ).fetchone()
+        alias_count = int(alias_row["total"] or 0)
+        pending = int(pending_row["total"] or 0)
+        resolved_limit = max(1, int(limit or HME_ACCOUNT_ALIAS_LIMIT))
+        return AliasCapacity(
+            account=account,
+            alias_count=alias_count,
+            pending=pending,
+            limit=resolved_limit,
+            remaining=max(0, resolved_limit - alias_count - pending),
+        )
+
+    def assert_alias_capacity(self, account: str) -> AliasCapacity:
+        capacity = self.get_alias_capacity(account)
+        if not capacity.allowed:
+            raise HMEAccountAliasLimitError(
+                account=capacity.account,
+                alias_count=capacity.alias_count,
+                limit=capacity.limit,
+                pending=capacity.pending,
+            )
+        return capacity
 
     def set_active(self, account: str, anonymous_id: str, active: bool) -> int:
         with self._connect() as conn:
@@ -1496,8 +1601,17 @@ class AliasDB:
         lim = max(1, min(int(limit or 50), 500))
         off = max(0, int(offset or 0))
         # date_utc 可能为空（Date 头缺失/不可解析），回落到 fetched_at 保证排序稳定
+        # 列表不需要纯文本缓存，避免把大字段拖进邮箱池。
+        select_sql = (
+            "SELECT id, account, parent_mail, mailbox, uid, message_id, alias_hme, "
+            "from_name, from_addr, sender_addr, return_path, received_spf, envelope_from, "
+            "is_relayed, relay_label, to_addr, delivered_to, subject, mail_type, code, summary, "
+            "date_header, date_utc, internaldate, size, flags_json, is_seen, has_attachment, "
+            "attachments_json, body_text_len, body_html_len, content_type, fetched_at, created_at, updated_at "
+            "FROM mails"
+        )
         sql = (
-            "SELECT * FROM mails" + clause
+            select_sql + clause
             + " ORDER BY CASE WHEN date_utc != '' THEN date_utc ELSE fetched_at END DESC,"
               " id DESC LIMIT ? OFFSET ?"
         )
@@ -1585,6 +1699,20 @@ class AliasDB:
                 "SELECT * FROM mails WHERE id = ? LIMIT 1", (int(mail_id),)
             ).fetchone()
         return self._row_to_mail(row) if row else None
+
+    def save_mail_body_text(self, account: str, mailbox: str, uid: str, body_text: str) -> None:
+        """只更新纯文本缓存，不碰 flags / 附件。"""
+        text = body_text or ""
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE mails
+                SET body_text = ?, body_text_len = ?, updated_at = ?
+                WHERE account = ? AND mailbox = ? AND uid = ?
+                """,
+                (text, len(text), utc_now(), account, mailbox, str(uid)),
+            )
+            conn.commit()
 
     # ---------- 增量收取水位 ----------
 
@@ -1811,6 +1939,7 @@ class AliasDB:
             body_text_len=row["body_text_len"],
             body_html_len=row["body_html_len"],
             content_type=row["content_type"],
+            body_text=row["body_text"] if "body_text" in row.keys() else "",
             fetched_at=row["fetched_at"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],

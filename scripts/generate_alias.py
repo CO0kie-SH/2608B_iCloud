@@ -14,9 +14,11 @@ from tools.config import load_settings
 from tools.db import AliasDB
 from tools.hme import HMEService
 from tools.rate_limit import (
+    HME_ACCOUNT_ALIAS_LIMIT,
     HME_CREATE_LIMIT_PER_HOUR,
     HME_CREATE_MAX_INTERVAL_MINUTES,
     HME_CREATE_MIN_INTERVAL_MINUTES,
+    HMEAccountAliasLimitError,
     HMECreateRateLimitError,
 )
 
@@ -96,6 +98,9 @@ def main() -> int:
     except CookieInvalidError as e:
         print(f"ERROR: {e}")
         return 3
+    except HMEAccountAliasLimitError as e:
+        print(f"ERROR: 拒绝创建（单账号最多{HME_ACCOUNT_ALIAS_LIMIT}个）: {e}")
+        return 2
     except HMECreateRateLimitError as e:
         print(f"ERROR: 拒绝创建（1小时最多{HME_CREATE_LIMIT_PER_HOUR}个 / 间隔{HME_CREATE_MIN_INTERVAL_MINUTES}分钟）: {e}")
         return 2

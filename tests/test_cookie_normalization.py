@@ -3,13 +3,14 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import yaml
+import requests
 
 from tools.accounts import parse_accounts_file
-from tools.client import ICloudHMEClient
-from tools.config import Settings
+from tools.client import ICloudError, ICloudHMEClient
+from tools.config import Settings, settings_for_account, settings_for_browser
 from tools.cookie_capture import (
     playwright_cookies_to_header,
     update_account_apple_id,
@@ -67,8 +68,88 @@ class CookieNormalizationTests(unittest.TestCase):
             self.assertEqual(client.cookies, NORMALIZED_COOKIE)
             self.assertEqual(client.session.headers["Cookie"], NORMALIZED_COOKIE)
 
+    def test_hme_client_prefers_direct_and_falls_back_to_proxy_on_transport_error(self) -> None:
+        settings = Settings(
+            app_name="test",
+            debug=False,
+            domain="icloud.com",
+            accounts_files="accounts/",
+            client_build="BUILD",
+            client_id="CLIENT",
+            camoufox_dir="",
+            camoufox_proxy="",
+            log_dir="",
+            hme_proxy="socks5h://127.0.0.1:1080",
+        )
+        response = Mock(status_code=200, text='{"ok": true}')
+        response.json.return_value = {"ok": True}
+
+        with ICloudHMEClient(settings, NORMALIZED_COOKIE) as client:
+            self.assertFalse(client.session.trust_env)
+            self.assertEqual(client.session.proxies, {})
+            self.assertIsNotNone(client._proxy_session)
+            self.assertEqual(
+                client._proxy_session.proxies["https"], "socks5h://127.0.0.1:1080"
+            )
+            with patch.object(
+                client.session, "request", side_effect=requests.ConnectionError("direct down")
+            ) as direct, patch.object(
+                client._proxy_session, "request", return_value=response
+            ) as proxy:
+                self.assertEqual(client._request("GET", "https://example.test"), {"ok": True})
+                self.assertEqual(client.network_report(success=True)["route"], "direct_then_proxy")
+                self.assertTrue(client.network_report(success=True)["used_proxy"])
+                self.assertEqual(client.network_report(success=True)["successful_attempts"], 1)
+                self.assertEqual(client.network_report(success=True)["failed_attempts"], 1)
+            direct.assert_called_once()
+            proxy.assert_called_once()
+
+    def test_hme_client_does_not_fallback_on_http_error(self) -> None:
+        settings = Settings(
+            app_name="test",
+            debug=False,
+            domain="icloud.com",
+            accounts_files="accounts/",
+            client_build="BUILD",
+            client_id="CLIENT",
+            camoufox_dir="",
+            camoufox_proxy="",
+            log_dir="",
+            hme_proxy="http://proxy.example:8080",
+        )
+        response = Mock(status_code=421, text="expired")
+
+        with ICloudHMEClient(settings, NORMALIZED_COOKIE) as client:
+            with patch.object(client.session, "request", return_value=response) as direct, patch.object(
+                client._proxy_session, "request"
+            ) as proxy:
+                with self.assertRaisesRegex(ICloudError, "HTTP 421"):
+                    client._request("GET", "https://example.test")
+                report = client.network_report(success=False)
+                self.assertEqual(report["route"], "direct")
+                self.assertFalse(report["used_proxy"])
+            direct.assert_called_once()
+            proxy.assert_not_called()
+
     def test_hme_header_drops_unrelated_login_cookies(self) -> None:
         self.assertEqual(normalize_hme_cookie_header(MIXED_COOKIE), NORMALIZED_COOKIE)
+
+    def test_hme_api_uses_global_setup_even_for_cn_accounts(self) -> None:
+        settings = Settings(
+            app_name="test",
+            debug=False,
+            domain="icloud.com",
+            accounts_files="accounts/",
+            client_build="BUILD",
+            client_id="CLIENT",
+            camoufox_dir="",
+            camoufox_proxy="",
+            log_dir="logs",
+        )
+        account = type("Acc", (), {"icloud_domain": "icloud.com.cn"})()
+
+        self.assertEqual(settings_for_account(settings, account).setup_host, "https://setup.icloud.com")
+        self.assertEqual(settings_for_browser(settings, account).origin, "https://www.icloud.com.cn")
 
     def test_playwright_cookies_follow_request_domain_scope(self) -> None:
         records = [

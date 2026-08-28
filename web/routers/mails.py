@@ -79,10 +79,15 @@ def mail_stats(
 
 
 @router.get("/{account}/{mailbox}/{uid}", response_model=MailDetailOut)
-def mail_detail(account: str, mailbox: str, uid: str) -> MailDetailOut:
+def mail_detail(
+    account: str,
+    mailbox: str,
+    uid: str,
+    html: bool = Query(default=False),
+) -> MailDetailOut:
     """
-    元数据取自本地库，正文实时从 IMAP 拉取（按设计不落库）。
-    拉取失败时降级为只返回元数据 + fetch_error，前端仍可展示分类结果。
+    默认只返回纯文本：有缓存读库，没有再拉服务器并按 MailMessageParser 算法写入缓存。
+    html=1 时才向服务器要 HTML。拉取失败时仍返回本地元数据和已有纯文本。
     """
     db = get_db()
     record = db.get_mail(account, mailbox, uid)
@@ -92,15 +97,38 @@ def mail_detail(account: str, mailbox: str, uid: str) -> MailDetailOut:
     acc = resolve_account(account)
     extractor = MailAliasExtractor([acc])
     meta = mail_to_out(record, recipient_alias=extractor.extract_address(record))
+    cached_text = (getattr(record, "body_text", "") or "").strip()
+    html_available = bool(record.body_html_len or cached_text or record.body_text_len)
+    if cached_text and not html:
+        return MailDetailOut(
+            meta=meta,
+            body_text=cached_text,
+            body_html="",
+            body_source="cache",
+            html_available=html_available,
+        )
+
     try:
         client = get_mail_client(acc, timeout=DETAIL_TIMEOUT)
         data = client.get_by_uid(
             uid=uid, mailbox=mailbox, include_body=True, body_limit=DETAIL_BODY_LIMIT
         )
     except HTTPException as e:
-        return MailDetailOut(meta=meta, fetch_error=str(e.detail))
+        return MailDetailOut(
+            meta=meta,
+            body_text=cached_text,
+            fetch_error=str(e.detail),
+            body_source="cache" if cached_text else "",
+            html_available=html_available,
+        )
     except Exception as e:
-        return MailDetailOut(meta=meta, fetch_error=f"{type(e).__name__}: {e}")
+        return MailDetailOut(
+            meta=meta,
+            body_text=cached_text,
+            fetch_error=f"{type(e).__name__}: {e}",
+            body_source="cache" if cached_text else "",
+            html_available=html_available,
+        )
 
     envelope = (data.get("envelope_from") or "").strip()
     if envelope and envelope != (meta.envelope_from or ""):
@@ -151,8 +179,20 @@ def mail_detail(account: str, mailbox: str, uid: str) -> MailDetailOut:
     )
     meta.recipient_alias = extractor.extract_address(live_row)
 
+    live_text = (data.get("body_text") or "").strip()
+    if live_text and live_text != cached_text:
+        try:
+            db.save_mail_body_text(record.account, record.mailbox, record.uid, live_text)
+            meta.body_text_len = len(live_text)
+        except Exception:
+            pass
+        cached_text = live_text
+
+    live_html = (data.get("body_html") or "") if html else ""
     return MailDetailOut(
         meta=meta,
-        body_text=data.get("body_text") or "",
-        body_html=data.get("body_html") or "",
+        body_text=cached_text or live_text,
+        body_html=live_html,
+        body_source="server",
+        html_available=bool(live_html or record.body_html_len or cached_text or live_text),
     )

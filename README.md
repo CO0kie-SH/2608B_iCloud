@@ -6,9 +6,30 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.8.18A** |
+| **版本** | **26.8.28** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
-| **最后更新** | 2026-08-18 |
+| **最后更新** | 2026-08-28 |
+
+---
+
+## 版本 26.8.28 变更摘要
+
+| 模块 | 变更 |
+|------|------|
+| HME 网络 | API 默认直连，连接、超时或 TLS 传输失败后才使用代理兜底；HTTP 业务响应不切换链路 |
+| 代理配置 | 新增可选 `proxy.yaml`，支持项目变量及 HTTP、HTTPS、SOCKS5、SOCKS5H 代理；非空 YAML 值优先于 `.env` |
+| 链路报告 | 生产任务持久化 `direct`、`proxy`、`direct_then_proxy` 和请求成功/失败次数；单次与轮询生产页均显示链路和最终结果 |
+| 失败记账 | 生成、保留或本地持久化失败会释放原子占位，不写入成功冷却池；只有完整生产成功才记录 `create_events` |
+| 总量风控 | 单账号最多保有 `740` 个隐私邮箱，停用地址也计入；已有地址加在途占位达到上限时返回 `409 HME_ACCOUNT_LIMIT` |
+| 轮询生产 | 满额账号自动跳过且不计失败；保存最近任务及网络报告，运行日志区分提交失败、限流、跳过和生产结果 |
+| 生产前端 | 账号配额增加 `总量 x/740` 和在途数量；满额后禁用生产按钮/轮询复选框；任务状态恢复独立滚动区 |
+| 邮件详情 | 纯文本正文按需写入 SQLite 缓存，列表查询不读取大字段；HTML 仅在点击 HTML 标签时实时拉取 |
+| 区域兼容 | 中国区浏览器仍使用 `icloud.com.cn`，HME API 验证固定使用全局 `setup.icloud.com` |
+| 测试 | 增加直连/代理切换、正文缓存、失败释放占位、739+1 并发边界、740 上限、轮询跳过和 HTTP 409 契约测试 |
+
+**升级注意：** 首次启动会自动给 `mails` 增加 `body_text`，并扩展轮询状态的最近任务字段。
+`proxy.yaml` 可直接保留空值继续使用 `.env`。总量上限按本地 SQLite 已同步的全部地址计算，生产前应先用
+`POST /api/aliases/refresh` 同步账号别名。
 
 ---
 
@@ -89,18 +110,20 @@ user2@example.com----APP_PASSWORD----http://127.0.0.1:7897
 
 ## 硬性规矩（必须遵守）
 
-> ### 每个账户，滚动 1 小时内最多 5 个；两次生产至少间隔 13–15 分钟
+> ### 每个账户总量最多 740 个；滚动 1 小时内最多 5 个；两次生产至少间隔 13–15 分钟
 
 | 项 | 规定 |
 |----|------|
 | 范围 | **按账户分别计数**（互不影响） |
+| 总量上限 | **740 个 / 账户**；停用地址仍计入，在途原子占位也预占容量 |
 | 窗口 | **滚动 1 小时**（非自然整点） |
 | 上限 | **5 个 / 小时 / 账户** |
 | 间隔 | **`3600/5+1 = 13` 分钟起**，成功后随机落到 **[13, 15] 分钟** |
-| 实现 | `create_alias` 创建前通过 SQLite 事务原子占位；失败释放，成功记账 |
+| 实现 | `create_alias` 创建前通过 SQLite 事务同时检查总量和小时配额；失败释放，成功记账 |
 | 记录 | 表 `create_events`：`created_at` + unix `produce_at` / `next_produce_at` |
 | 并发 | Web 线程和多个浏览器客户端共用数据库配额，不按客户端分别计数 |
-| 常量 | `tools/rate_limit.py` → `HME_CREATE_LIMIT_PER_HOUR = 5`，`HME_CREATE_MIN/MAX_INTERVAL_MINUTES = 13/15` |
+| 常量 | `tools/rate_limit.py` → `HME_ACCOUNT_ALIAS_LIMIT = 740`、`HME_CREATE_LIMIT_PER_HOUR = 5`、`HME_CREATE_MIN/MAX_INTERVAL_MINUTES = 13/15` |
+| 满额错误 | HTTP `409`，错误码 `HME_ACCOUNT_LIMIT`；这是容量上限，不返回 `Retry-After` |
 | Cookie 失效 | HTTP 421 / 缺 cookie 会写入 `account_flags.cookie_invalid`；再生产立刻 `409 COOKIE_INVALID`，`--all` 跳过。`cookie-login` 成功后自动摘标 |
 
 **原因：** 短时间大量创建会触发 Apple 限流（如 `-41015`），严重时导致账户暂时不可用。**禁止绕过。**
@@ -119,7 +142,7 @@ python main.py quota -a user001@icloud.com
 | 多账户 | `accounts/*.yml`/`.yaml`：`mail` + `apple` / `163mail` / `inbox`（可缩减） |
 | HME | 列表 / 生成 / 停用 / 恢复；本地 SQLite |
 | **CDK** | 标签 `CDK_<sha256>`；**CDK → 隐私邮箱 + 母号** 查询 |
-| 限流 | 1 小时 5 个创建硬限制 + 配额查询 |
+| 限流 | 单账号总量 740 + 1 小时 5 个 + 13–15 分钟间隔；支持容量与配额查询 |
 | 安全随机 | 按 OS 切换：Linux `getrandom`/`urandom`，Windows/macOS `secrets` |
 | 邮件 | IMAP/SMTP；`type`/`summary`/`code`；按 UID 取 JSON |
 | WebUI | 首页号池统计、邮箱池、邮件分类、文本/HTML详情、后台增量同步 |
@@ -141,6 +164,7 @@ python main.py quota -a user001@icloud.com
 ├── produce.bat / produce.sh        # 独立 curl 生产客户端（不参与风控）
 ├── requirements.txt
 ├── .env / .env.example          # 本地密钥，勿提交
+├── proxy.yaml                   # 代理与项目变量（可选）
 ├── README.md
 ├── accounts/                    # 每文件 = 一个账户（勿提交真实 cookie）
 │   └── _example.yaml.example
@@ -174,7 +198,7 @@ python main.py quota -a user001@icloud.com
     ├── hme.py                   # list / create_alias / on/off + CDK 标签
     ├── secure_random.py         # 跨平台安全随机
     ├── db.py                    # SQLite：CDK / 配额 / 任务 / 失效标
-    ├── rate_limit.py            # 1h/5 + 13–15 分钟间隔
+    ├── rate_limit.py            # 总量 740 + 1h/5 + 13–15 分钟间隔
     ├── mail.py                  # IMAP/SMTP + MIME/目录解析
     ├── mail_sync.py             # 增量收信入库
     └── production.py            # 多线程 HME 生产流水线
@@ -273,6 +297,27 @@ ACCOUNTS_FILES=accounts/
 CLIENT_BUILD=2610Hotfix23
 CLIENT_ID=37bd9669-50c3-4d52-af42-1d240d3ac4f3
 ```
+
+HME API 请求默认先直连；仅当直连发生连接、超时或 TLS 等传输异常时，才切换到代理重试。
+通过 `HME_PROXY` 指定兜底代理，支持 `http://`、`https://`、`socks5://` 和 `socks5h://`。
+留空时依次使用 `HTTPS_PROXY`、`HTTP_PROXY`、`ALL_PROXY`、`CAMOUFOX_PROXY`；填写
+`none`、`off` 或 `direct` 可强制纯直连。收到 HTTP 421/4xx/5xx 响应时不会切换代理，
+这类结果按 Apple 的业务响应处理。
+
+### `proxy.yaml`
+
+根目录的 `proxy.yaml` 是可选配置，非空值优先于 `.env`。模板已随项目提供，常用字段如下：
+
+```yaml
+proxy:
+  hme_proxy: "socks5h://127.0.0.1:1080"
+  camoufox_proxy: "http://127.0.0.1:7897"
+  mailcom_proxy: ""
+```
+
+HME 生产任务会在 `result.network` 保存每次创建的链路报告：`direct`（直连）、`proxy`（代理）、
+`direct_then_proxy`（直连传输失败后代理兜底）或 `not_started`，并同时给出 `status`、
+`success`、`used_proxy`、成功/失败尝试数。生产页和轮询生产页会显示网络链路与最终成功、部分成功或失败。
 
 ### 账户文件（YAML）
 
@@ -431,6 +476,7 @@ start_web.bat 8771
 | 参数 | 当前规则 |
 |------|----------|
 | iCloud 账号 | 精确到单个账户，配额互相独立 |
+| 总量容量 | 已有地址与在途任务达到 `740` 后禁用提交，并返回 `HME_ACCOUNT_LIMIT` |
 | 生产接口 | `legacy`：旧版接口（每小时5个，间隔13–15分钟） |
 | 生产数量 | 旧版接口单次只能 `1` 个；间隔未到时剩余为 0 |
 | 并发线程 | `1-5`；每个线程使用独立 Apple 会话 |
@@ -440,6 +486,7 @@ start_web.bat 8771
 | 项目 | 轮询规则 |
 |------|----------|
 | 账号选择 | 首次默认全部不参与；勾选结果写入 SQLite，运行中修改会在下一轮生效 |
+| 满额账号 | 已有地址与在途任务达到 `740` 时禁用选择；运行期间达到上限则记为“跳过”，不计生产失败 |
 | 执行方式 | 后端独立单线程按列表顺序执行；每个账号固定提交 `legacy / count=1 / threads=1` |
 | 任务轮询 | 每 2 秒查询当前生产任务，完成后再处理下一个账号；关闭浏览器页面不影响线程 |
 | 限流等待 | 429 时记录本轮最短 `retry_after`，继续扫描其他账号，整轮结束后统一等待 |
@@ -454,14 +501,15 @@ start_web.bat 8771
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/accounts` | 账户、provider、邮件数和创建配额 |
+| `GET` | `/api/accounts` | 账户、provider、邮件数、总量容量和创建配额 |
 | `GET` | `/api/aliases` | 本地隐私邮箱池 |
 | `POST` | `/api/aliases/refresh` | 从 iCloud 同步某账户的别名 |
 | `GET` | `/api/mails` | 邮件元数据列表 |
-| `GET` | `/api/mails/{account}/{mailbox}/{uid}` | 实时拉取单封正文 |
+| `GET` | `/api/mails/{account}/{mailbox}/{uid}` | 读取缓存纯文本；未缓存时实时拉取并写入 |
+| `GET` | `/api/mails/{account}/{mailbox}/{uid}?html=1` | 按需实时拉取单封 HTML 正文 |
 | `POST` | `/api/sync` | 提交后台增量收信任务 |
 | `GET` | `/api/sync/{job_id}` | 查询收信任务 |
-| `GET` | `/api/production/options` | 生产接口、账户和配额 |
+| `GET` | `/api/production/options` | 生产接口、账户、总量容量和小时配额 |
 | `POST` | `/api/production` | 提交生产任务 |
 | `GET` | `/api/production/jobs` | 查询持久化生产历史 |
 | `GET` | `/api/production/jobs/{job_id}` | 查询一个生产任务 |
@@ -585,11 +633,11 @@ CDK_xxx  →  {
 
 | 表 | 用途 |
 |----|------|
-| `create_claims` | 创建前原子占位；防止多线程同时越过每小时上限 |
+| `create_claims` | 创建前原子占位；防止多线程同时越过 740 总量或每小时上限 |
 | `production_jobs` | 持久化生产任务、进度、结果和错误 |
 | `production_loop_state` | 轮询账号选择、运行状态、计数、截止时间和最近日志 |
 | `client_sync_state` | 记录多客户端最近打开时间 |
-| `mails` | 邮件元数据和分类结果；正文不落库 |
+| `mails` | 邮件元数据、分类结果和纯文本正文缓存；HTML 不落库 |
 | `mail_sync_state` | 每账户、每目录的增量 UID 水位 |
 
 ### CDK 查询 API

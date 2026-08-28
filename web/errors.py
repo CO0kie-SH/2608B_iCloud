@@ -7,7 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from tools.client import CookieInvalidError, ICloudError
-from tools.rate_limit import HMECreateRateLimitError
+from tools.rate_limit import HMEAccountAliasLimitError, HMECreateRateLimitError
 
 
 def _payload(code: str, message: str) -> dict[str, dict[str, str]]:
@@ -36,6 +36,13 @@ def register_error_handlers(app: FastAPI) -> None:
             status_code=429,
             content=_payload("rate_limited", str(exc)),
             headers={"Retry-After": str(retry)},
+        )
+
+    @app.exception_handler(HMEAccountAliasLimitError)
+    async def _account_limit(_: Request, exc: HMEAccountAliasLimitError) -> JSONResponse:
+        return JSONResponse(
+            status_code=409,
+            content=_payload(exc.code, str(exc)),
         )
 
     @app.exception_handler(ICloudError)

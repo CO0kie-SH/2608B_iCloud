@@ -12,6 +12,7 @@ router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 def _account_out(acc, db: AliasDB) -> AccountOut:
     parent = parent_mail_of(acc)
     quota = db.get_create_quota(acc.name)
+    capacity = db.get_alias_capacity(acc.name)
     inbox = acc.resolve_inbox()
     flag = db.get_account_flag(acc.name) or {}
     cookie_invalid = bool(flag.get("cookie_invalid")) or not bool(acc.ok)
@@ -25,7 +26,11 @@ def _account_out(acc, db: AliasDB) -> AccountOut:
         # 收件端点未必是母号的 iCloud 地址（可能配了 163），前端要显示真实来源
         inbox_provider=(inbox.name if inbox else ""),
         inbox_mail=(inbox.mail if inbox else (acc.inbox_mail or "")),
-        alias_count=len(db.list_aliases(acc.name)),
+        alias_count=capacity.alias_count,
+        alias_pending=capacity.pending,
+        alias_limit=capacity.limit,
+        alias_remaining=capacity.remaining,
+        alias_limit_reached=not capacity.allowed,
         mail_count=db.count_mails(account=acc.name),
         quota_used=quota.used,
         quota_limit=quota.limit,

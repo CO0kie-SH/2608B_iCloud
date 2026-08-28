@@ -6,7 +6,7 @@ from typing import Any, Callable
 
 from tools.client import CookieInvalidError
 from tools.db import AliasDB, unix_now, utc_now
-from tools.rate_limit import HMECreateRateLimitError
+from tools.rate_limit import HMEAccountAliasLimitError, HMECreateRateLimitError
 from web.deps import get_accounts, get_db, get_settings
 from web.jobs import get_production_job
 from web.production_service import submit_account_production
@@ -40,8 +40,31 @@ class ProductionLoopController:
 
     def startup(self) -> dict[str, Any]:
         with self._lock:
+            released_claims = self.db.release_all_create_claims()
             interrupted = self.db.mark_incomplete_production_jobs()
             state = self.db.get_production_loop_state()
+            if not state.get("last_job_id"):
+                selected = set(state.get("selected_accounts") or [])
+                recent = self.db.list_production_jobs(limit=50)
+                candidates = [
+                    item
+                    for item in recent
+                    if not selected or str(item.get("account") or "") in selected
+                ]
+                last = next(
+                    (
+                        item
+                        for item in candidates
+                        if (item.get("result") or {}).get("network_summary")
+                        or (item.get("result") or {}).get("network")
+                    ),
+                    candidates[0] if candidates else None,
+                )
+                if last:
+                    state = self.db.update_production_loop_state(
+                        last_account=str(last.get("account") or ""),
+                        last_job_id=str(last.get("job_id") or ""),
+                    )
             if not state.get("enabled"):
                 if state.get("status") in {"running", "stopping"}:
                     state = self.db.update_production_loop_state(
@@ -62,6 +85,8 @@ class ProductionLoopController:
             message = "服务启动后自动恢复轮询"
             if interrupted:
                 message += f"，已整理 {interrupted} 个中断任务"
+            if released_claims:
+                message += f"，已释放 {released_claims} 个遗留占位"
             self._append_progress(message)
             self._launch_locked()
             return self.snapshot()
@@ -152,6 +177,8 @@ class ProductionLoopController:
                 deadline_at=deadline,
                 current_account="",
                 current_job_id="",
+                last_account="",
+                last_job_id="",
                 next_run_at=0,
                 round_no=0,
                 submitted=0,
@@ -188,6 +215,11 @@ class ProductionLoopController:
         if current_job is not None and hasattr(current_job, "to_dict"):
             current_job = current_job.to_dict()
         state["current_job"] = current_job
+        last_job_id = str(state.get("last_job_id") or "")
+        last_job = self.job_getter(last_job_id, self.db) if last_job_id else None
+        if last_job is not None and hasattr(last_job, "to_dict"):
+            last_job = last_job.to_dict()
+        state["last_job"] = last_job
         return state
 
     def _launch_locked(self) -> None:
@@ -259,6 +291,7 @@ class ProductionLoopController:
                 self._append_progress(f"第 {round_no} 轮开始，参与账号 {len(selected)} 个")
                 accounts = {item.name: item for item in self.accounts_loader()}
                 next_wait = 0
+                retry_without_cooldown = False
 
                 for name in selected:
                     if self._shutdown_event.is_set():
@@ -275,6 +308,14 @@ class ProductionLoopController:
                         self._append_progress(f"跳过 {name}：账户配置已不存在")
                         continue
                     self.db.reconcile_cookie_flag(account)
+                    capacity = self.db.get_alias_capacity(name)
+                    if not capacity.allowed:
+                        self._increment(skipped=1)
+                        pending = f"，在途 {capacity.pending} 个" if capacity.pending else ""
+                        self._append_progress(
+                            f"跳过 {name}：已有 {capacity.alias_count}/{capacity.limit} 个隐私邮箱{pending}，容量已满"
+                        )
+                        continue
                     flag = self.db.get_account_flag(name) or {}
                     if flag.get("cookie_invalid") or not bool(account.ok):
                         self._increment(skipped=1)
@@ -295,6 +336,10 @@ class ProductionLoopController:
                             settings=self.settings_loader(),
                             db=self.db,
                         )
+                    except HMEAccountAliasLimitError as exc:
+                        self._increment(skipped=1)
+                        self._append_progress(f"跳过 {name}：{exc}")
+                        continue
                     except HMECreateRateLimitError as exc:
                         self._increment(failed=1)
                         next_wait = self._min_wait(next_wait, exc.retry_after_sec)
@@ -308,6 +353,7 @@ class ProductionLoopController:
                         continue
                     except Exception as exc:
                         self._increment(failed=1)
+                        retry_without_cooldown = True
                         self._append_progress(
                             f"提交失败 {name}：{type(exc).__name__}: {exc}"
                         )
@@ -317,10 +363,35 @@ class ProductionLoopController:
                     self.db.update_production_loop_state(current_job_id=job_id)
                     self._append_progress(f"任务 {job_id} 已提交")
                     terminal = self._terminal_job(job_id)
+                    self.db.update_production_loop_state(
+                        last_account=name, last_job_id=job_id
+                    )
                     result = terminal.get("result") or {}
                     created = int(result.get("created") or terminal.get("created") or 0)
                     errors = list(result.get("errors") or [])
                     error_text = str(terminal.get("error") or "")
+                    reports = [
+                        item for item in (result.get("network") or []) if isinstance(item, dict)
+                    ]
+                    routes = {str(item.get("route") or "") for item in reports}
+                    if "direct_then_proxy" in routes or {"direct", "proxy"}.issubset(routes):
+                        network_label = "直连失败，代理兜底"
+                    elif "proxy" in routes:
+                        network_label = "代理"
+                    elif "direct" in routes:
+                        network_label = "直连"
+                    else:
+                        network_label = "未开始"
+                    network_successes = sum(
+                        int(item.get("successful_attempts") or 0) for item in reports
+                    )
+                    network_failures = sum(
+                        int(item.get("failed_attempts") or 0) for item in reports
+                    )
+                    outcome_label = "成功" if terminal.get("status") == "done" and not errors and not error_text else "失败"
+                    self._append_progress(
+                        f"网络 {name}：{network_label}；网络请求成功 {network_successes} / 失败 {network_failures}；结果 {outcome_label}"
+                    )
                     if created:
                         self._increment(created=created)
                         hmes = [str(item.get("hme") or "") for item in result.get("items") or []]
@@ -328,12 +399,20 @@ class ProductionLoopController:
                             f"完成 {name}：created={created} {' '.join(h for h in hmes if h)}"
                         )
                     if terminal.get("status") != "done" or errors or error_text:
-                        self._increment(failed=1)
                         detail = error_text or "; ".join(str(item) for item in errors) or "未知错误"
-                        self._append_progress(f"任务失败 {name}：{detail}")
-                        if "RATE_LIMIT" in detail or "rate_limited" in detail.lower():
+                        if "HME_ACCOUNT_LIMIT" in detail:
+                            self._increment(skipped=1)
+                            self._append_progress(f"任务跳过 {name}：{detail}")
+                        elif "RATE_LIMIT" in detail or "rate_limited" in detail.lower():
+                            self._increment(failed=1)
+                            self._append_progress(f"任务失败 {name}：{detail}")
                             quota = self.db.get_create_quota(name)
                             next_wait = self._min_wait(next_wait, quota.retry_after_sec)
+                        else:
+                            self._increment(failed=1)
+                            self._append_progress(f"任务失败 {name}：{detail}")
+                            if "COOKIE_INVALID" not in detail:
+                                retry_without_cooldown = True
 
                 self.db.update_production_loop_state(
                     current_account="", current_job_id=""
@@ -349,7 +428,7 @@ class ProductionLoopController:
                     break
 
                 interval = max(1, int(state.get("interval_sec") or 2))
-                wait_sec = max(interval, next_wait)
+                wait_sec = interval if retry_without_cooldown else max(interval, next_wait)
                 deadline = int(state.get("deadline_at") or 0)
                 if deadline:
                     wait_sec = min(wait_sec, max(0, deadline - self.clock()))
@@ -357,7 +436,7 @@ class ProductionLoopController:
                     finish_status = "completed"
                     break
                 self.db.update_production_loop_state(next_run_at=self.clock() + wait_sec)
-                if next_wait > interval:
+                if next_wait > interval and not retry_without_cooldown:
                     self._append_progress(f"本轮最短风控 {next_wait}s，扫完后等待")
                 if self._wait(wait_sec):
                     continue

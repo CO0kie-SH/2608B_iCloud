@@ -13,6 +13,7 @@ def production_options_data(accounts: list[Any], *, settings: Any, db: Any) -> d
     for account in accounts:
         db.reconcile_cookie_flag(account)
         quota = db.get_create_quota(account.name)
+        capacity = db.get_alias_capacity(account.name)
         flag = db.get_account_flag(account.name) or {}
         cookie_invalid = bool(flag.get("cookie_invalid")) or not bool(account.ok)
         items.append(
@@ -28,6 +29,11 @@ def production_options_data(accounts: list[Any], *, settings: Any, db: Any) -> d
                 "quota_limit": quota.limit,
                 "quota_remaining": quota.remaining,
                 "quota_retry_after_sec": quota.retry_after_sec,
+                "alias_count": capacity.alias_count,
+                "alias_pending": capacity.pending,
+                "alias_limit": capacity.limit,
+                "alias_remaining": capacity.remaining,
+                "alias_limit_reached": not capacity.allowed,
                 "last_produce_at": quota.last_produce_at,
                 "next_produce_at": quota.next_produce_at,
             }
@@ -68,6 +74,7 @@ def submit_account_production(
         raise ValueError("并发线程范围为 1-5")
 
     db.reconcile_cookie_flag(account)
+    db.assert_alias_capacity(account.name)
     db.assert_cookie_ready(account.name)
     db.assert_can_create(account.name)
     account_settings = settings_for_account(settings, account)

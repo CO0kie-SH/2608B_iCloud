@@ -17,9 +17,11 @@ from .mail import (
     mail_client_from_account,
 )
 from .rate_limit import (
+    HME_ACCOUNT_ALIAS_LIMIT,
     HME_CREATE_LIMIT_PER_HOUR,
     HME_CREATE_MAX_INTERVAL_MINUTES,
     HME_CREATE_MIN_INTERVAL_MINUTES,
+    HMEAccountAliasLimitError,
     HMECreateRateLimitError,
     pick_create_interval_seconds,
 )
@@ -48,8 +50,10 @@ __all__ = [
     "get_mail_by_uid",
     "mail_client_from_account",
     "HME_CREATE_LIMIT_PER_HOUR",
+    "HME_ACCOUNT_ALIAS_LIMIT",
     "HME_CREATE_MIN_INTERVAL_MINUTES",
     "HME_CREATE_MAX_INTERVAL_MINUTES",
+    "HMEAccountAliasLimitError",
     "HMECreateRateLimitError",
     "pick_create_interval_seconds",
 ]

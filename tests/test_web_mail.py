@@ -49,5 +49,28 @@ class WebMailSchemaTests(unittest.TestCase):
         self.assertEqual(result.model_dump()["recipient_alias"], "known+tag@icloud.com")
 
 
+class MailBodyCacheTests(unittest.TestCase):
+    def test_save_and_reload_plain_text_without_listing_it(self) -> None:
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        from tools.db import AliasDB
+
+        with TemporaryDirectory() as temp_dir:
+            db = AliasDB(Path(temp_dir) / "aliases.db")
+            db.upsert_mail(
+                account="owner@icloud.com",
+                uid="99",
+                mailbox="INBOX",
+                subject="hi",
+                from_addr="a@b.com",
+            )
+            db.save_mail_body_text("owner@icloud.com", "INBOX", "99", "验证码 123456")
+            stored = db.get_mail("owner@icloud.com", "INBOX", "99")
+            listed = db.list_mails(account="owner@icloud.com")[0]
+            self.assertEqual(stored.body_text, "验证码 123456")
+            self.assertEqual(stored.body_text_len, len("验证码 123456"))
+            self.assertEqual(listed.body_text, "")
+
+
 if __name__ == "__main__":
     unittest.main()

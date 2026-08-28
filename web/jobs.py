@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from tools.db import AliasDB, utc_now
+from tools.production import summarize_network
 
 # 并发上限 2：同一账户的 IMAP 连接数有限，开太多容易被服务端限流
 _EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="mail-sync")
@@ -208,12 +209,15 @@ def submit_production(
         try:
             result = runner(progress)
             with _LOCK:
+                network = list(getattr(result, "network", None) or [])
                 job.result = {
                     "requested": result.requested,
                     "threads": result.threads,
                     "created": result.created,
                     "items": result.items,
                     "errors": result.errors,
+                    "network": network,
+                    "network_summary": summarize_network(network),
                 }
                 job.status = "done" if result.created or not result.errors else "error"
                 if result.errors:
@@ -229,7 +233,22 @@ def submit_production(
             with _LOCK:
                 job.status = "error"
                 job.error = f"{type(exc).__name__}: {exc}"
-                db.update_production_job(job.job_id, status=job.status, error=job.error)
+                job.result = {
+                    "requested": int(requested),
+                    "threads": 0,
+                    "created": 0,
+                    "items": [],
+                    "errors": [job.error],
+                    "network": [],
+                    "network_summary": summarize_network([]),
+                }
+                db.update_production_job(
+                    job.job_id,
+                    status=job.status,
+                    created=0,
+                    result_json=json.dumps(job.result, ensure_ascii=False),
+                    error=job.error,
+                )
         finally:
             with _LOCK:
                 job.finished_at = utc_now()

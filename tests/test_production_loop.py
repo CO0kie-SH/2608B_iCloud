@@ -9,9 +9,13 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
-from tools.db import AliasDB
+from tools.db import AliasDB, utc_now
 from tools.production import ProductionResult
-from tools.rate_limit import HMECreateRateLimitError
+from tools.rate_limit import (
+    HME_ACCOUNT_ALIAS_LIMIT,
+    HMEAccountAliasLimitError,
+    HMECreateRateLimitError,
+)
 from web.jobs import get_production_job
 from web.production_loop import ProductionLoopController
 from web.production_service import submit_account_production
@@ -45,6 +49,22 @@ class ProductionLoopTests(unittest.TestCase):
             ok=ok,
             source=str(source),
         )
+
+    def insert_aliases(self, account: str, count: int) -> None:
+        now = utc_now()
+        with self.db._connect() as conn:
+            conn.executemany(
+                """
+                INSERT INTO aliases (
+                    parent_mail, account, hme, is_active, created_at, updated_at
+                ) VALUES (?, ?, ?, 1, ?, ?)
+                """,
+                [
+                    (account, account, f"alias-{index}@icloud.com", now, now)
+                    for index in range(count)
+                ],
+            )
+            conn.commit()
 
     @staticmethod
     def done_job(job_id: str, _: AliasDB) -> dict[str, Any]:
@@ -111,6 +131,8 @@ class ProductionLoopTests(unittest.TestCase):
         self.assertFalse(state["enabled"])
         self.assertEqual(state["status"], "stopped")
         self.assertEqual(state["selected_accounts"], [])
+        self.assertEqual(state["last_account"], "")
+        self.assertEqual(state["last_job_id"], "")
 
         self.db.update_production_loop_state(
             selected_accounts=["a", "b"],
@@ -122,6 +144,26 @@ class ProductionLoopTests(unittest.TestCase):
         self.assertEqual(reopened["submitted"], 7)
         self.assertEqual(len(reopened["progress"]), 200)
         self.assertEqual(reopened["progress"][0], "line-50")
+
+    def test_startup_backfills_latest_network_report(self) -> None:
+        account = self.account("latest@icloud.com")
+        self.db.create_production_job("latest-job", account.name, "legacy", 1)
+        self.db.update_production_job(
+            "latest-job",
+            status="done",
+            result_json='{"network_summary":{"route":"direct"}}',
+        )
+        controller = self.controller(
+            [account],
+            submitter=lambda *args, **kwargs: None,
+            job_getter=lambda job_id, db: db.get_production_job(job_id),
+        )
+
+        state = controller.startup()
+
+        self.assertEqual(state["last_account"], account.name)
+        self.assertEqual(state["last_job_id"], "latest-job")
+        self.assertEqual(controller.snapshot()["last_job"]["result"]["network_summary"]["route"], "direct")
 
     def test_config_validation_and_active_config_lock(self) -> None:
         account = self.account("a@icloud.com")
@@ -160,6 +202,9 @@ class ProductionLoopTests(unittest.TestCase):
         self.assertEqual(state["created"], 2)
         self.assertEqual(state["failed"], 0)
         self.assertEqual(state["status"], "completed")
+        self.assertEqual(state["last_account"], "a@icloud.com")
+        self.assertEqual(state["last_job_id"], "job-a")
+        self.assertEqual(state["last_job"]["status"], "done")
 
     def test_rate_limits_continue_and_use_shortest_round_wait(self) -> None:
         accounts = [self.account(f"{name}@icloud.com") for name in ("a", "b", "c")]
@@ -185,6 +230,36 @@ class ProductionLoopTests(unittest.TestCase):
         self.assertEqual(controller.waits, [4])
         self.assertTrue(any("最短风控 4s" in line for line in state["progress"]))
 
+    def test_retryable_failure_does_not_inherit_another_account_cooldown(self) -> None:
+        cooling = self.account("cooling@icloud.com")
+        retryable = self.account("retryable@icloud.com")
+
+        def submitter(account: Any, **_: Any) -> SimpleNamespace:
+            if account.name == cooling.name:
+                raise HMECreateRateLimitError(account.name, 1, 5, 600, "interval")
+            return SimpleNamespace(job_id="job-retryable")
+
+        def job_getter(job_id: str, _: AliasDB) -> dict[str, Any]:
+            return {
+                "job_id": job_id,
+                "status": "error",
+                "result": {"created": 0, "items": [], "errors": ["network error"]},
+                "error": "network error",
+            }
+
+        controller = self.controller(
+            [cooling, retryable], submitter=submitter, job_getter=job_getter
+        )
+        self.configure(controller, [cooling.name, retryable.name], interval_sec=3)
+        controller.start()
+        self.wait_for_thread(controller)
+
+        state = controller.snapshot()
+        self.assertEqual(state["created"], 0)
+        self.assertEqual(state["failed"], 2)
+        self.assertEqual(controller.waits, [3])
+        self.assertFalse(any("最短风控 600s" in line for line in state["progress"]))
+
     def test_cookie_invalid_account_is_skipped(self) -> None:
         blocked = self.account("blocked@icloud.com")
         ready = self.account("ready@icloud.com")
@@ -205,6 +280,27 @@ class ProductionLoopTests(unittest.TestCase):
         self.assertEqual(state["submitted"], 1)
         self.assertEqual(state["created"], 1)
         self.assertEqual(state["skipped"], 1)
+
+    def test_account_at_alias_limit_is_skipped_without_submission(self) -> None:
+        full = self.account("full@icloud.com")
+        self.insert_aliases(full.name, HME_ACCOUNT_ALIAS_LIMIT)
+        submitted: list[str] = []
+
+        def submitter(account: Any, **_: Any) -> SimpleNamespace:
+            submitted.append(account.name)
+            return SimpleNamespace(job_id="unexpected")
+
+        controller = self.controller([full], submitter=submitter)
+        self.configure(controller, [full.name])
+        controller.start()
+        self.wait_for_thread(controller)
+
+        state = controller.snapshot()
+        self.assertEqual(submitted, [])
+        self.assertEqual(state["submitted"], 0)
+        self.assertEqual(state["failed"], 0)
+        self.assertEqual(state["skipped"], 1)
+        self.assertTrue(any("740/740" in line and "跳过" in line for line in state["progress"]))
 
     def test_stop_waits_for_current_job_then_finishes(self) -> None:
         account = self.account("a@icloud.com")
@@ -289,6 +385,23 @@ class ProductionLoopTests(unittest.TestCase):
                 **common, interface="legacy", count=1, threads=0
             )
 
+    def test_shared_submitter_rejects_account_at_alias_limit(self) -> None:
+        account = self.account("full-pipeline@icloud.com")
+        self.insert_aliases(account.name, HME_ACCOUNT_ALIAS_LIMIT)
+
+        with self.assertRaises(HMEAccountAliasLimitError) as raised:
+            submit_account_production(
+                account,
+                interface="legacy",
+                count=1,
+                threads=1,
+                settings=SimpleNamespace(),
+                db=self.db,
+            )
+
+        self.assertEqual(raised.exception.code, "HME_ACCOUNT_LIMIT")
+        self.assertEqual(self.db.list_production_jobs(), [])
+
     def test_shared_submitter_runs_and_persists_successful_job(self) -> None:
         account = self.account("pipeline@icloud.com")
         result = ProductionResult(
@@ -297,6 +410,15 @@ class ProductionLoopTests(unittest.TestCase):
             created=1,
             items=[{"hme": "generated@icloud.com"}],
             errors=[],
+            network=[
+                {
+                    "route": "direct",
+                    "used_proxy": False,
+                    "direct_attempted": True,
+                    "proxy_attempted": False,
+                    "status": "success",
+                }
+            ],
         )
         with patch("web.production_service.produce_aliases", return_value=result) as produce:
             job = submit_account_production(
@@ -317,8 +439,12 @@ class ProductionLoopTests(unittest.TestCase):
         persisted = self.db.get_production_job(job.job_id)
         self.assertEqual(data["status"], "done")
         self.assertEqual(data["result"]["created"], 1)
+        self.assertEqual(data["result"]["network"][0]["route"], "direct")
+        self.assertEqual(data["result"]["network_summary"]["route"], "direct")
+        self.assertTrue(data["result"]["network_summary"]["success"])
         self.assertEqual(persisted["status"], "done")
         self.assertEqual(persisted["created"], 1)
+        self.assertEqual(persisted["result"]["network"][0]["status"], "success")
         produce.assert_called_once()
 
 

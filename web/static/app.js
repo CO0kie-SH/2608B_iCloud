@@ -477,15 +477,45 @@ async function openMailDetail(account, mailbox, uid) {
   drawer.classList.remove("hidden");
   mask.classList.remove("hidden");
   document.getElementById("drawerTitle").textContent = "加载中…";
-  body.innerHTML = `<div class="empty">正在从邮件服务器拉取正文…</div>`;
+  body.innerHTML = `<div class="empty">正在读取邮件…</div>`;
+  state.detailKey = { account, mailbox, uid };
 
   try {
     const path = `/api/mails/${encodeURIComponent(account)}/${encodeURIComponent(mailbox)}/${encodeURIComponent(uid)}`;
     state.detail = await api(path);
-    state.detailTab = (state.detail.body_text || !state.detail.body_html) ? "text" : "html";
+    state.detailTab = "text";
     renderDetail();
   } catch (e) {
     body.innerHTML = `<div class="err-text">加载失败: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+async function loadMailHtml() {
+  const key = state.detailKey;
+  if (!key || !state.detail) return;
+  if (state.detail.body_html) {
+    state.detailTab = "html";
+    renderDetail();
+    return;
+  }
+  const body = document.getElementById("drawerBody");
+  body.insertAdjacentHTML("afterbegin", `<div class="empty" id="htmlFetchHint">正在从邮件服务器拉取 HTML…</div>`);
+  try {
+    const path = `/api/mails/${encodeURIComponent(key.account)}/${encodeURIComponent(key.mailbox)}/${encodeURIComponent(key.uid)}?html=1`;
+    const live = await api(path);
+    state.detail = {
+      ...state.detail,
+      ...live,
+      body_text: state.detail.body_text || live.body_text || "",
+      body_html: live.body_html || "",
+      html_available: live.html_available ?? state.detail.html_available,
+    };
+    state.detailTab = state.detail.body_html ? "html" : "text";
+    renderDetail();
+  } catch (e) {
+    toast(`HTML 拉取失败: ${e.message}`, "err");
+    const hint = document.getElementById("htmlFetchHint");
+    if (hint) hint.remove();
   }
 }
 
@@ -522,12 +552,12 @@ function renderDetail() {
 
   const hasText = Boolean(d.body_text);
   const hasHtml = Boolean(d.body_html);
-  if (state.detailTab === "text" && !hasText && hasHtml) state.detailTab = "html";
+  const showHtmlTab = hasHtml || d.html_available !== false;
   if (state.detailTab === "html" && !hasHtml && hasText) state.detailTab = "text";
   const tabs = `
     <div class="body-tabs">
       ${hasText ? `<span class="body-tab${state.detailTab === "text" ? " active" : ""}" data-tab="text">文本</span>` : ""}
-      ${hasHtml ? `<span class="body-tab${state.detailTab === "html" ? " active" : ""}" data-tab="html">HTML</span>` : ""}
+      ${showHtmlTab ? `<span class="body-tab${state.detailTab === "html" ? " active" : ""}" data-tab="html">HTML</span>` : ""}
     </div>`;
 
   let bodyHtml;
@@ -551,6 +581,10 @@ function renderDetail() {
 
   document.querySelectorAll("#drawerBody .body-tab").forEach((el) => {
     el.addEventListener("click", () => {
+      if (el.dataset.tab === "html" && !state.detail.body_html) {
+        loadMailHtml();
+        return;
+      }
       state.detailTab = el.dataset.tab;
       renderDetail();
     });

@@ -62,7 +62,7 @@
     </div>
     <div class="loop-table-wrap">
       <table class="loop-account-table">
-        <thead><tr><th class="loop-check-col">参与</th><th>iCloud 账号</th><th>状态</th><th>本小时</th><th>剩余</th><th>上次生产</th><th>下次可生产</th></tr></thead>
+        <thead><tr><th class="loop-check-col">参与</th><th>iCloud 账号</th><th>状态</th><th>总量</th><th>本小时</th><th>剩余</th><th>上次生产</th><th>下次可生产</th></tr></thead>
         <tbody id="loopAccountRows"></tbody>
       </table>
     </div>
@@ -74,6 +74,10 @@
       <dl class="loop-status-list">
         <div><dt>当前账号</dt><dd id="loopCurrentAccount">-</dd></div>
         <div><dt>当前任务</dt><dd id="loopCurrentJob">-</dd></div>
+        <div><dt>最近账号</dt><dd id="loopLastAccount">-</dd></div>
+        <div><dt>最近任务</dt><dd id="loopLastJob">-</dd></div>
+        <div><dt>最近链路</dt><dd id="loopLastNetwork">-</dd></div>
+        <div><dt>最近结果</dt><dd id="loopLastOutcome">-</dd></div>
         <div><dt>启动时间</dt><dd id="loopStartedAt">-</dd></div>
         <div><dt>截止时间</dt><dd id="loopDeadline">-</dd></div>
         <div><dt>下次轮询</dt><dd id="loopNextRun">-</dd></div>
@@ -107,6 +111,6 @@
   </div>
 </aside>
 <script src="/static/settings.js"></script>
-<script src="/static/production_loop.js"></script>
+<script src="/static/production_loop.js?v=20260828-3"></script>
 </body>
 </html>

@@ -45,6 +45,10 @@ class AccountOut(BaseModel):
     inbox_provider: str
     inbox_mail: str
     alias_count: int
+    alias_pending: int
+    alias_limit: int
+    alias_remaining: int
+    alias_limit_reached: bool
     mail_count: int
     quota_used: int
     quota_limit: int
@@ -146,6 +150,8 @@ class MailDetailOut(BaseModel):
     body_text: str = ""
     body_html: str = ""
     fetch_error: str = ""
+    body_source: str = ""
+    html_available: bool = True
 
 
 class MailComAccountOut(BaseModel):
