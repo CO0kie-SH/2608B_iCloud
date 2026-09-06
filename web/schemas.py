@@ -58,6 +58,9 @@ class AccountOut(BaseModel):
     next_produce_at: int = 0
     cookie_invalid: bool = False
     cookie_invalid_reason: str = ""
+    free_plan: bool = False
+    plan_name: str = ""
+    plan_checked_at: int = 0
     format_errors: list[str]
     missing_cookie_keys: list[str]
 

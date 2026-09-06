@@ -6,9 +6,27 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.8.28** |
+| **版本** | **26.9.6A** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
-| **最后更新** | 2026-08-28 |
+| **最后更新** | 2026-09-06 |
+
+---
+
+## 版本 26.9.6A 变更摘要
+
+| 模块 | 变更 |
+|------|------|
+| 套餐核验 | 生产收到 HTTP 403 后，通过容量和套餐来源接口查询当前套餐；仅在信息完整、一致且确认为免费 5 GB 时移出生产池 |
+| 状态持久化 | `account_flags` 新增 `free_plan`、`plan_name`、`plan_checked_at`；套餐标记独立于 Cookie 失效，重启和重新采 Cookie 后保留 |
+| 生产拦截 | 免费账号从轮询参与列表移除；后续 Web 提交返回 `409 ICLOUD_FREE_PLAN`，CLI 和原子创建占位同样检查套餐标记 |
+| 轮询与页面 | 免费账号禁用选择并显示独立原因；生产池清空后结束轮询，页面禁用开始按钮；任务状态变化后刷新生产资格 |
+| 套餐恢复 | 新增 `python main.py plan -a ACCOUNT`，复查并更新套餐标记；确认非免费 5 GB 后解除该限制，再手动勾选参与账号 |
+| 异常保留 | 查询失败、字段缺失或容量不一致时保留原生产资格；非免费套餐保留原始 403 错误，不误标为 Cookie 失效 |
+| 测试 | 覆盖 403 核验、非免费与未知状态、数据库迁移、重启持久化、空池停止、409 契约和 CLI 复查；全量 80 项测试通过 |
+
+**升级注意：** 升级前备份 `db/aliases.db`，首次启动自动扩展 `account_flags`，原账号、地址和邮件保留。
+升级不会批量修改既有账号的生产资格；后续生产遇到 403 时核验，也可主动运行 `plan` 命令复查。
+部署时停止旧版本写入实例，再启动新版；默认端口仍为 `8770`。
 
 ---
 
@@ -125,6 +143,7 @@ user2@example.com----APP_PASSWORD----http://127.0.0.1:7897
 | 常量 | `tools/rate_limit.py` → `HME_ACCOUNT_ALIAS_LIMIT = 740`、`HME_CREATE_LIMIT_PER_HOUR = 5`、`HME_CREATE_MIN/MAX_INTERVAL_MINUTES = 13/15` |
 | 满额错误 | HTTP `409`，错误码 `HME_ACCOUNT_LIMIT`；这是容量上限，不返回 `Retry-After` |
 | Cookie 失效 | HTTP 421 / 缺 cookie 会写入 `account_flags.cookie_invalid`；再生产立刻 `409 COOKIE_INVALID`，`--all` 跳过。`cookie-login` 成功后自动摘标 |
+| 免费套餐 | HTTP 403 后确认为免费 5 GB 时，持久化套餐标记并移出生产池；后续 Web 提交返回 `409 ICLOUD_FREE_PLAN`，续费后通过 `plan` 复查 |
 
 **原因：** 短时间大量创建会触发 Apple 限流（如 `-41015`），严重时导致账户暂时不可用。**禁止绕过。**
 
@@ -147,6 +166,7 @@ python main.py quota -a user001@icloud.com
 | 邮件 | IMAP/SMTP；`type`/`summary`/`code`；按 UID 取 JSON |
 | WebUI | 首页号池统计、邮箱池、邮件分类、文本/HTML详情、后台增量同步 |
 | 生产 | 单次生产页 + 独立轮询页；按账号控制参与范围，任务进度与结果持久化 |
+| 套餐 | HTTP 403 后核验免费 5 GB；自动移出生产池，支持 CLI 复查及解除套餐限制 |
 | 多客户端 | 打开即同步；生产历史、配额和邮件状态以服务器 SQLite 为准 |
 | Cookie 采集 | Camoufox **有头**登录 iCloud → 写回 `apple.cookie`（2FA 在浏览器完成） |
 | CLI | `main.py` 子命令；`generate_alias.bat`；`start_web.bat`；`cookie_login.bat`；`produce.bat` / `produce.sh` |
@@ -195,6 +215,7 @@ python main.py quota -a user001@icloud.com
     ├── cookie_capture.py        # 有头采 cookie + debug 落盘
     ├── session_store.py         # db/cookie 会话保存/注入
     ├── client.py                # HME HTTP（Cookie）
+    ├── icloud_plan.py           # 套餐响应校验、免费 5 GB 判定与领域异常
     ├── hme.py                   # list / create_alias / on/off + CDK 标签
     ├── secure_random.py         # 跨平台安全随机
     ├── db.py                    # SQLite：CDK / 配额 / 任务 / 失效标
@@ -451,6 +472,27 @@ python main.py cookie-login -a user003@icloud.com
 
 ## 启动 WebUI
 
+### HTTP 403 与免费套餐处理
+
+生产遇到 HTTP 403 后，会通过容量和套餐来源接口核验当前套餐。确认是免费 5 GB 时，
+账号会标记为 `ICLOUD_FREE_PLAN` 并从轮询参与列表移除，后续创建请求在本地返回 409。
+账号文件、已有地址和邮件保留；此标记独立于 Cookie 失效，并在服务重启后保留。
+生产池没有参与账号时，轮询自动结束。
+
+套餐查询失败、响应字段不完整或容量与来源不一致时，保留原生产资格并记录查询失败；
+确认其他套餐时保留生产资格及原始 403 错误。HTTP 403 本身不直接作为免费套餐依据。
+
+续费后执行套餐复查。确认已离开免费 5 GB 后解除套餐限制，再在页面重新勾选账号：
+
+```powershell
+& 'D:\0Code2\py312\python.exe' main.py plan -a 'your@icloud.com'
+```
+
+复查仍为免费 5 GB 时继续移出生产池；复查失败时保留原状态。重新获取 Cookie 不会清除套餐标记。
+本地地址总量上限及创建冷却限制仍独立生效。
+
+### 运行服务
+
 ```powershell
 & 'D:\0Code2\py312\python.exe' main.py web --host 127.0.0.1 --port 8770
 ```
@@ -487,6 +529,7 @@ start_web.bat 8771
 |------|----------|
 | 账号选择 | 首次默认全部不参与；勾选结果写入 SQLite，运行中修改会在下一轮生效 |
 | 满额账号 | 已有地址与在途任务达到 `740` 时禁用选择；运行期间达到上限则记为“跳过”，不计生产失败 |
+| 免费套餐 | 403 后确认免费 5 GB 则移除参与账号并记为“跳过”；池中没有参与账号时自动结束 |
 | 执行方式 | 后端独立单线程按列表顺序执行；每个账号固定提交 `legacy / count=1 / threads=1` |
 | 任务轮询 | 每 2 秒查询当前生产任务，完成后再处理下一个账号；关闭浏览器页面不影响线程 |
 | 限流等待 | 429 时记录本轮最短 `retry_after`，继续扫描其他账号，整轮结束后统一等待 |
@@ -521,6 +564,29 @@ start_web.bat 8771
 | `GET` | `/api/mailcom/accounts` | 列出 mail.com 账号地址（不返回密码） |
 | `GET` | `/api/mailcom/messages?account=...` | 读取指定 mail.com 账号的收件箱与分类 |
 | `GET` | `/api/mailcom/messages/{account}/{mail_id}` | 拉取 mail.com 单封邮件正文 |
+
+`/api/accounts` 和 `/api/production/options` 的账号对象新增：
+
+| 字段 | 含义 |
+|------|------|
+| `free_plan` | 是否已确认免费 5 GB 并限制生产；默认 `false` 不代表已查询或付费 |
+| `plan_name` | 最近成功查询到的套餐名称；尚未查询时为空字符串 |
+| `plan_checked_at` | 最近成功查询时间，Unix 秒；尚未查询时为 `0` |
+| `hme_ok` | Cookie 准备就绪且没有免费套餐标记；总量和创建冷却仍独立检查 |
+
+首次异步生产任务遇到 403 并确认为免费套餐时，任务结果包含 `ICLOUD_FREE_PLAN`，
+已经受理任务的 HTTP 202 响应保持不变。标记生效后的新提交在受理前返回：
+
+```json
+{
+  "error": {
+    "code": "ICLOUD_FREE_PLAN",
+    "message": "ICLOUD_FREE_PLAN: account=user001@icloud.com 当前套餐为免费 5 GB，已移出生产池。续费后请运行 main.py plan 复查套餐"
+  }
+}
+```
+
+该响应为 HTTP 409，不附带 `Retry-After`。现有地址管理与邮件收取不受套餐生产标记影响。
 
 独立 curl 客户端（不参与风控，配额仍由 Python 服务执行）：
 
@@ -852,6 +918,7 @@ D:\0Code2\py312\python.exe main.py mail-export-codes -o sava\verification_codes.
 | `camoufox_runtime.py` | 项目内 Camoufox 路径 / fetch |
 | `cookie_capture.py` | 有头/无头采 Cookie、读取转发邮箱并写回 YAML |
 | `client.py` | `ICloudHMEClient` |
+| `icloud_plan.py` | `ICloudPlan`、容量与套餐来源一致性校验、`ICloudFreePlanError` |
 | `hme.py` | `HMEService`、`generate_cdk_label` |
 | `secure_random.py` | 跨平台 `secure_random_bytes` |
 | `db.py` | `AliasDB`：CDK 映射、配额、`resolve_cdk` |
@@ -891,3 +958,17 @@ python main.py web --port 8770
 ```
 
 Cookie 421 → `python main.py cookie-login -a <账户>`（或手工改 YAML 的 `apple.cookie` / `cookie`）。
+
+套餐复查 → `python main.py plan -a user001@icloud.com`；查询成功会更新生产限制，查询失败保留原状态。
+
+## 回归验证
+
+安装运行依赖及测试客户端依赖 `httpx` 后执行：
+
+```bash
+python -m unittest discover -s tests -q
+```
+
+`tests/test_icloud_plan.py` 使用模拟 HTTP 响应和临时 SQLite，覆盖套餐核验、移出生产池、
+状态持久化、续费复查和 API 错误契约，不触发真实账号创建或订阅变更。
+前端另验证桌面和手机视口下的免费账号禁用、空池提示和开始按钮状态。

@@ -97,7 +97,7 @@ def produce_aliases(
     threads = max(1, min(int(threads), 5, count))
     account_name = getattr(account, "name", "?")
     db.reconcile_cookie_flag(account)
-    db.assert_cookie_ready(account_name)
+    db.assert_production_ready(account_name)
     if not getattr(account, "ok", False):
         db.mark_cookie_invalid(account_name, reason="cookie_incomplete")
         raise CookieInvalidError(account_name, reason="cookie_incomplete")

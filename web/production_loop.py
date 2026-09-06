@@ -6,6 +6,7 @@ from typing import Any, Callable
 
 from tools.client import CookieInvalidError
 from tools.db import AliasDB, unix_now, utc_now
+from tools.icloud_plan import ICloudFreePlanError
 from tools.rate_limit import HMEAccountAliasLimitError, HMECreateRateLimitError
 from web.deps import get_accounts, get_db, get_settings
 from web.jobs import get_production_job
@@ -286,6 +287,10 @@ class ProductionLoopController:
                     break
 
                 selected = list(state.get("selected_accounts") or [])
+                if not selected:
+                    self._append_progress("生产池已无参与账号，轮询结束")
+                    finish_status = "completed"
+                    break
                 round_no = int(state.get("round_no") or 0) + 1
                 self.db.update_production_loop_state(round_no=round_no, next_run_at=0)
                 self._append_progress(f"第 {round_no} 轮开始，参与账号 {len(selected)} 个")
@@ -308,6 +313,11 @@ class ProductionLoopController:
                         self._append_progress(f"跳过 {name}：账户配置已不存在")
                         continue
                     self.db.reconcile_cookie_flag(account)
+                    flag = self.db.get_account_flag(name) or {}
+                    if flag.get("free_plan"):
+                        self._increment(skipped=1)
+                        self._append_progress(f"跳过 {name}：免费 5 GB，已移出生产池")
+                        continue
                     capacity = self.db.get_alias_capacity(name)
                     if not capacity.allowed:
                         self._increment(skipped=1)
@@ -346,6 +356,10 @@ class ProductionLoopController:
                         self._append_progress(
                             f"限流 {name}：retry_after={exc.retry_after_sec}s，本轮继续"
                         )
+                        continue
+                    except ICloudFreePlanError as exc:
+                        self._increment(skipped=1)
+                        self._append_progress(f"跳过 {name}：{exc}")
                         continue
                     except CookieInvalidError as exc:
                         self._increment(failed=1)
@@ -400,7 +414,10 @@ class ProductionLoopController:
                         )
                     if terminal.get("status") != "done" or errors or error_text:
                         detail = error_text or "; ".join(str(item) for item in errors) or "未知错误"
-                        if "HME_ACCOUNT_LIMIT" in detail:
+                        if "ICLOUD_FREE_PLAN" in detail:
+                            self._increment(skipped=1)
+                            self._append_progress(f"移出生产池 {name}：当前套餐为免费 5 GB")
+                        elif "HME_ACCOUNT_LIMIT" in detail:
                             self._increment(skipped=1)
                             self._append_progress(f"任务跳过 {name}：{detail}")
                         elif "RATE_LIMIT" in detail or "rate_limited" in detail.lower():
@@ -422,6 +439,10 @@ class ProductionLoopController:
                 state = self.db.get_production_loop_state()
                 if self._stop_event.is_set() or not state.get("enabled"):
                     finish_status = "stopped"
+                    break
+                if not state.get("selected_accounts"):
+                    self._append_progress("生产池已无参与账号，轮询结束")
+                    finish_status = "completed"
                     break
                 if self._deadline_hit(state):
                     finish_status = "completed"

@@ -20,7 +20,10 @@ def _account_out(acc, db: AliasDB) -> AccountOut:
         name=acc.name,
         mail=acc.mail or "",
         apple_id=acc.apple_id or "",
-        hme_ok=bool(acc.ok) and not cookie_invalid,
+        hme_ok=bool(acc.ok) and not cookie_invalid and not flag.get("free_plan", False),
+        free_plan=bool(flag.get("free_plan")),
+        plan_name=str(flag.get("plan_name") or ""),
+        plan_checked_at=int(flag.get("plan_checked_at") or 0),
         mail_ready=bool(acc.mail_ready),
         providers=sorted(acc.providers.keys()),
         # 收件端点未必是母号的 iCloud 地址（可能配了 163），前端要显示真实来源

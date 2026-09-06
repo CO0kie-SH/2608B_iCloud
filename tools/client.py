@@ -3,16 +3,19 @@ from __future__ import annotations
 import json
 import os
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode, urlsplit
 
 import requests
 
 from .config import Settings, ensure_env_loaded
 from .cookies import normalize_hme_cookie_header
+from .icloud_plan import ICloudPlan
 
 
 class ICloudError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class CookieInvalidError(RuntimeError):
@@ -205,9 +208,10 @@ class ICloudHMEClient:
             if resp.status_code == 421:
                 raise ICloudError(
                     "HTTP 421: Cookie 已失效，请执行 "
-                    "python main.py cookie-login -a ACCOUNT 重新采集"
+                    "python main.py cookie-login -a ACCOUNT 重新采集",
+                    status_code=421,
                 )
-            raise ICloudError(f"HTTP {resp.status_code}: {body}")
+            raise ICloudError(f"HTTP {resp.status_code}: {body}", status_code=resp.status_code)
 
         if not resp.text:
             return {}
@@ -248,6 +252,33 @@ class ICloudHMEClient:
 
         self._api_base = str(found_url).rstrip("/")
         return self._api_base
+
+    def get_current_plan(self) -> ICloudPlan:
+        data = self._validation_data
+        if data is None:
+            url = f"{self.settings.setup_host}/setup/ws/1/validate?{self._client_query()}"
+            data = self._request("POST", url)
+        if not isinstance(data, dict):
+            raise ICloudError("套餐查询缺少有效会话")
+        ws = data.get("webservices") or {}
+        info = data.get("dsInfo") or {}
+        account_service = ws.get("account") or {}
+        base = str(account_service.get("url") or "").rstrip("/")
+        parsed = urlsplit(base)
+        host = parsed.hostname or ""
+        dsid = info.get("dsid")
+        if (parsed.scheme != "https" or not host.endswith((".icloud.com", ".icloud.com.cn"))
+                or parsed.username or parsed.password or not dsid):
+            raise ICloudError("套餐查询缺少有效账户服务地址")
+        china = "-china." in host or host.endswith(".icloud.com.cn")
+        domain = "icloud.com.cn" if china else "icloud.com"
+        storage = self._request("POST", f"{base}/setup/ws/1/storageUsageInfo?{self._client_query()}")
+        plan = self._request(
+            "GET",
+            f"https://gatewayws.{domain}/acsegateway/v3/accounts/"
+            f"{quote(str(dsid), safe='')}/subscriptions/features/cloud.storage/plan-summary",
+        )
+        return ICloudPlan.from_responses(storage, plan)
 
     def get_account_apple_id(self) -> str:
         """返回校验响应中的主 Apple ID，而不是 iCloud 邮箱别名。"""

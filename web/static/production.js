@@ -89,9 +89,11 @@ function renderQuota() {
     <span>下次 ${fmtUnix(account.next_produce_at)}</span>
     ${retry ? `<span>冷却 ${Math.ceil(retry / 60)} 分钟</span>` : ""}
     ${limitReached ? `<em>${aliasPending ? `含 ${aliasPending} 个正在生产任务，容量已满` : `已达到单账号 ${aliasLimit} 个隐私邮箱生产上限`}</em>` : ""}
-    ${blocked ? "<em>Cookie 已失效，已移出生产线</em>" : ""}` : "";
+    ${account.free_plan ? "<em>当前套餐：免费 5 GB，已移出生产池</em>" : blocked ? "<em>Cookie 已失效，已移出生产线</em>" : ""}`
+    : state.accounts.length && state.accounts.every((item) => item.free_plan)
+      ? "<em>免费 5 GB 账号已移出生产池，暂无可生产账号</em>" : "";
   byId("productionCount").max = remaining > 0 ? 1 : 1;
-  byId("productionStart").disabled = Boolean(account && (blocked || limitReached || remaining <= 0));
+  byId("productionStart").disabled = !account || blocked || limitReached || remaining <= 0;
 }
 
 function renderJobs() {
@@ -116,12 +118,20 @@ async function loadOptions() {
   const data = await api("/api/production/options");
   const selected = byId("productionAccount").value;
   state.accounts = data.accounts || [];
-  byId("productionAccount").innerHTML = state.accounts.map((account) => `<option value="${escapeHtml(account.name)}">${escapeHtml(account.name)} · ${escapeHtml(account.mail)}</option>`).join("");
+  byId("productionAccount").innerHTML = state.accounts.map((account) => `<option value="${escapeHtml(account.name)}" ${account.free_plan ? "disabled" : ""}>${escapeHtml(account.name)} · ${account.free_plan ? "免费 5 GB，已移出" : escapeHtml(account.mail)}</option>`).join("");
+  if (!state.accounts.length || state.accounts.every((account) => account.free_plan)) {
+    byId("productionAccount").insertAdjacentHTML("afterbegin", '<option value="" disabled selected>暂无可生产账号</option>');
+  }
   if (selected && state.accounts.some((account) => account.name === selected)) byId("productionAccount").value = selected;
   renderQuota();
 }
 
-async function loadJobs() { state.jobs = (await api("/api/production/jobs")).items || []; renderJobs(); }
+async function loadJobs() {
+  const previous = new Map(state.jobs.map((job) => [job.job_id, job.status]));
+  state.jobs = (await api("/api/production/jobs")).items || [];
+  renderJobs();
+  if (state.jobs.some((job) => job.status !== previous.get(job.job_id))) await loadOptions();
+}
 
 async function startProduction(event) {
   event.preventDefault();

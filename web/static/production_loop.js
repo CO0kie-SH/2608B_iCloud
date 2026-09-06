@@ -127,7 +127,11 @@ function renderConfig(snapshot) {
   byId("loopInterface").disabled = active;
   byId("loopInterval").disabled = active;
   document.querySelectorAll('input[name="loopMode"]').forEach((item) => { item.disabled = active; });
-  byId("loopStart").disabled = active;
+  const selected = new Set(loopState.selectionDraft ?? snapshot.selected_accounts ?? []);
+  const eligible = (snapshot.accounts || []).some((account) => selected.has(account.name)
+    && account.hme_ok && !account.cookie_invalid && !account.alias_limit_reached
+    && Number(account.alias_count || 0) < Number(account.alias_limit || 740));
+  byId("loopStart").disabled = active || !eligible;
   byId("loopStop").disabled = !active || snapshot.status === "stopping";
 }
 
@@ -140,7 +144,7 @@ function renderAccounts(snapshot) {
     const aliasLimit = Math.max(1, Number(account.alias_limit) || 740);
     const limitReached = Boolean(account.alias_limit_reached || aliasCount >= aliasLimit);
     const ready = account.hme_ok && !account.cookie_invalid && !limitReached;
-    const status = limitReached ? `已达 ${aliasLimit} 上限` : ready ? "可用" : "Cookie 无效";
+    const status = account.free_plan ? "免费 5 GB，已移出" : limitReached ? `已达 ${aliasLimit} 上限` : ready ? "可用" : "Cookie 无效";
     const statusClass = ready ? "account-ready" : "account-blocked";
     return `<tr>
       <td class="loop-check-col"><input type="checkbox" data-loop-account value="${escapeHtml(account.name)}" ${ready && selected.has(account.name) ? "checked" : ""} ${ready ? "" : "disabled"} aria-label="${escapeHtml(account.name)} 参与生产"></td>
@@ -158,6 +162,7 @@ function renderAccounts(snapshot) {
     input.addEventListener("change", () => {
       loopState.selectionDraft = selectedFromDom();
       byId("loopSelectionCount").textContent = `${loopState.selectionDraft.length} 个`;
+      renderConfig(snapshot);
       saveConfig(loopState.selectionDraft).catch(() => {});
     });
   });

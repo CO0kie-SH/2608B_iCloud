@@ -21,7 +21,10 @@ def production_options_data(accounts: list[Any], *, settings: Any, db: Any) -> d
                 "name": account.name,
                 "mail": account.mail,
                 "icloud_domain": settings_for_account(settings, account).domain,
-                "hme_ok": bool(account.ok) and not cookie_invalid,
+                "hme_ok": bool(account.ok) and not cookie_invalid and not flag.get("free_plan", False),
+                "free_plan": bool(flag.get("free_plan")),
+                "plan_name": str(flag.get("plan_name") or ""),
+                "plan_checked_at": int(flag.get("plan_checked_at") or 0),
                 "cookie_invalid": cookie_invalid,
                 "cookie_invalid_reason": flag.get("reason")
                 or ("cookie_incomplete" if not account.ok else ""),
@@ -74,6 +77,7 @@ def submit_account_production(
         raise ValueError("并发线程范围为 1-5")
 
     db.reconcile_cookie_flag(account)
+    db.assert_production_ready(account.name)
     db.assert_alias_capacity(account.name)
     db.assert_cookie_ready(account.name)
     db.assert_can_create(account.name)

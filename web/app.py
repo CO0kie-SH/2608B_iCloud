@@ -30,7 +30,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="2608B iCloud 邮箱池子",
         description="HME 隐私邮箱池 + 邮件收取与分类展示",
-        version="26.8.28",
+        version="26.9.6A",
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         lifespan=lifespan,

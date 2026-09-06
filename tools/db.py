@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .icloud_plan import ICloudFreePlanError, ICloudPlan
 from .rate_limit import (
     HME_ACCOUNT_ALIAS_LIMIT,
     HME_CREATE_LIMIT_PER_HOUR,
@@ -482,6 +483,14 @@ class AliasDB:
                 )
                 """
             )
+            flag_cols = self._table_columns(conn, "account_flags")
+            for column, declaration in (
+                ("free_plan", "INTEGER NOT NULL DEFAULT 0"),
+                ("plan_name", "TEXT NOT NULL DEFAULT ''"),
+                ("plan_checked_at", "INTEGER NOT NULL DEFAULT 0"),
+            ):
+                if column not in flag_cols:
+                    conn.execute(f"ALTER TABLE account_flags ADD COLUMN {column} {declaration}")
             ev_cols = self._table_columns(conn, "create_events")
             if "cdk" not in ev_cols:
                 conn.execute(
@@ -779,6 +788,11 @@ class AliasDB:
         claim_id = uuid.uuid4().hex
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            flag = conn.execute(
+                "SELECT free_plan FROM account_flags WHERE account = ?", (account,)
+            ).fetchone()
+            if flag and flag["free_plan"]:
+                raise ICloudFreePlanError(account)
             conn.execute("DELETE FROM create_claims WHERE claimed_at < ?", (since_s,))
             last = conn.execute(
                 """
@@ -1062,6 +1076,15 @@ class AliasDB:
             f"{key} = ?" for key in normalized
         )
         with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if "selected_accounts_json" in normalized:
+                blocked = {row["account"] for row in conn.execute(
+                    "SELECT account FROM account_flags WHERE free_plan = 1"
+                )}
+                selected = json.loads(normalized["selected_accounts_json"])
+                normalized["selected_accounts_json"] = json.dumps(
+                    [name for name in selected if name not in blocked], ensure_ascii=False
+                )
             conn.execute(
                 sql + " WHERE id = 1",
                 [*normalized.values()],
@@ -1139,13 +1162,46 @@ class AliasDB:
             "cleared_at": now_unix,
         }
 
+    def save_account_plan(self, account: str, plan: ICloudPlan) -> None:
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT INTO account_flags (account, free_plan, plan_name, plan_checked_at, updated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    free_plan=excluded.free_plan, plan_name=excluded.plan_name,
+                    plan_checked_at=excluded.plan_checked_at, updated_at=excluded.updated_at
+                """,
+                (account, int(plan.free_5gb), plan.name, unix_now(), now),
+            )
+            if plan.free_5gb:
+                row = conn.execute(
+                    "SELECT selected_accounts_json FROM production_loop_state WHERE id = 1"
+                ).fetchone()
+                selected = json.loads(row["selected_accounts_json"]) if row else []
+                conn.execute(
+                    "UPDATE production_loop_state SET selected_accounts_json = ?, updated_at = ? WHERE id = 1",
+                    (json.dumps([name for name in selected if name != account], ensure_ascii=False), now),
+                )
+
+    def assert_production_ready(self, account: str) -> None:
+        self.assert_cookie_ready(account)
+        flag = self.get_account_flag(account)
+        if flag and flag["free_plan"]:
+            raise ICloudFreePlanError(account)
+
     def get_account_flag(self, account: str) -> dict[str, Any] | None:
         account = (account or "").strip()
         if not account:
             return None
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT account, cookie_invalid, reason, marked_at, cleared_at, updated_at FROM account_flags WHERE account = ?",
+                "SELECT * FROM account_flags WHERE account = ?",
                 (account,),
             ).fetchone()
         if not row:
@@ -1156,6 +1212,9 @@ class AliasDB:
             "reason": row["reason"] or "",
             "marked_at": int(row["marked_at"] or 0),
             "cleared_at": int(row["cleared_at"] or 0),
+            "free_plan": bool(row["free_plan"]),
+            "plan_name": row["plan_name"] or "",
+            "plan_checked_at": int(row["plan_checked_at"] or 0),
             "updated_at": row["updated_at"] or "",
         }
 

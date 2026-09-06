@@ -7,6 +7,7 @@ from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from tools.client import CookieInvalidError, ICloudError
+from tools.icloud_plan import ICloudFreePlanError
 from tools.rate_limit import HMEAccountAliasLimitError, HMECreateRateLimitError
 
 
@@ -22,6 +23,10 @@ def _server_error(exc: Exception) -> JSONResponse:
 
 
 def register_error_handlers(app: FastAPI) -> None:
+    @app.exception_handler(ICloudFreePlanError)
+    async def _free_plan(_: Request, exc: ICloudFreePlanError) -> JSONResponse:
+        return JSONResponse(status_code=409, content=_payload(exc.code, str(exc)))
+
     @app.exception_handler(CookieInvalidError)
     async def _cookie_invalid(_: Request, exc: CookieInvalidError) -> JSONResponse:
         return JSONResponse(

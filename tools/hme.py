@@ -5,7 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from .client import ICloudHMEClient
+from .client import ICloudError, ICloudHMEClient
+from .icloud_plan import ICloudFreePlanError
 from .rate_limit import HME_CREATE_LIMIT_PER_HOUR, HMECreateRateLimitError
 from .secure_random import random_backend_info, secure_random_bytes
 
@@ -157,9 +158,25 @@ class HMEService:
             res = self.reserve(hme=hme, label=label, note=note)
             if not res.get("success"):
                 raise RuntimeError(f"保留邮箱失败: {res}")
-        except Exception:
-            store.release_create_claim(claim_id)
-            raise
+        except Exception as exc:
+            try:
+                if isinstance(exc, ICloudError) and exc.status_code == 403:
+                    try:
+                        plan = self.client.get_current_plan()
+                    except Exception as check_error:
+                        raise ICloudError(
+                            f"{exc}；套餐查询失败（{type(check_error).__name__}），保留生产资格",
+                            status_code=403,
+                        ) from exc
+                    store.save_account_plan(account, plan)
+                    if plan.free_5gb:
+                        raise ICloudFreePlanError(account) from exc
+                    raise ICloudError(
+                        f"{exc}；当前套餐：{plan.name}，保留生产资格", status_code=403
+                    ) from exc
+                raise
+            finally:
+                store.release_create_claim(claim_id)
 
         try:
             result = res.get("result") or {}

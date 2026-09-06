@@ -17,7 +17,7 @@ from tools.camoufox_runtime import (
     resolve_camoufox_dir,
 )
 from tools.client import CookieInvalidError, ICloudError, ICloudHMEClient, is_cookie_failure
-from tools.config import add_region_arguments, apply_cli_domain, load_settings
+from tools.config import add_region_arguments, apply_cli_domain, load_settings, settings_for_account
 from tools.cookie_capture import CookieCaptureOptions, capture_icloud_cookie
 from tools.db import AliasDB
 from tools.hme import HMEService
@@ -62,8 +62,8 @@ def cmd_accounts(args: argparse.Namespace) -> int:
         print(
             f"    mail={a.mail or '-'}  appleid={apple_s}  "
             f"providers=[{prov_names}]  inbox={inbox_s}  "
-            f"hme_ok={a.ok and not marked}  mail_ready={a.mail_ready}  "
-            f"cookie_invalid={marked}"
+            f"hme_ok={a.ok and not marked and not flag.get('free_plan', False)}  mail_ready={a.mail_ready}  "
+            f"cookie_invalid={marked}  free_plan={bool(flag.get('free_plan'))}"
         )
         if settings.debug and a.cookies:
             preview = a.cookies[:60] + ("..." if len(a.cookies) > 60 else "")
@@ -199,6 +199,20 @@ def cmd_cdk(args: argparse.Namespace) -> int:
         print(f"未找到 CDK: {args.cdk}")
         return 1
     print(json.dumps(data, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_plan(args: argparse.Namespace) -> int:
+    settings, account = _pick_account(args.account, args)
+    try:
+        with ICloudHMEClient(settings_for_account(settings, account), account.cookies) as client:
+            plan = client.get_current_plan()
+        get_db().save_account_plan(account.name, plan)
+    except Exception as exc:
+        print(f"[{account.name}] 套餐查询失败（{type(exc).__name__}），保留原生产状态")
+        return 1
+    action = "已移出生产池" if plan.free_5gb else "套餐限制已解除，可重新选择参与生产"
+    print(f"[{account.name}] 当前套餐：{plan.name}；{action}")
     return 0
 
 
@@ -751,6 +765,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_gen.add_argument("-n", "--note", default="由 2608B_iCloud 生成", help="备注")
     add_region_arguments(p_gen)
     p_gen.set_defaults(func=cmd_generate)
+
+    p_plan = sub.add_parser("plan", help="复查当前套餐，更新或解除免费 5 GB 生产限制")
+    p_plan.add_argument("-a", "--account", help="账户/邮箱")
+    p_plan.set_defaults(func=cmd_plan)
 
     p_quota = sub.add_parser("quota", help="查看 HME 创建配额（1小时5个 + 13-15分钟间隔）")
     p_quota.add_argument("-a", "--account", help="账户/邮箱")
