@@ -76,7 +76,7 @@ function renderQuota() {
   const retry = account ? Math.max(0, Number(account.quota_retry_after_sec) || 0) : 0;
   const aliasCount = account ? Math.max(0, Number(account.alias_count) || 0) : 0;
   const aliasPending = account ? Math.max(0, Number(account.alias_pending) || 0) : 0;
-  const aliasLimit = account ? Math.max(1, Number(account.alias_limit) || 740) : 740;
+  const aliasLimit = account ? Math.max(1, Number(account.alias_limit) || 750) : 750;
   const limitReached = Boolean(account && (account.alias_limit_reached || aliasCount >= aliasLimit));
   const blocked = Boolean(account && (account.cookie_invalid || !account.hme_ok));
   byId("productionQuota").innerHTML = account ? `
@@ -89,7 +89,7 @@ function renderQuota() {
     <span>下次 ${fmtUnix(account.next_produce_at)}</span>
     ${retry ? `<span>冷却 ${Math.ceil(retry / 60)} 分钟</span>` : ""}
     ${limitReached ? `<em>${aliasPending ? `含 ${aliasPending} 个正在生产任务，容量已满` : `已达到单账号 ${aliasLimit} 个隐私邮箱生产上限`}</em>` : ""}
-    ${account.free_plan ? "<em>当前套餐：免费 5 GB，已移出生产池</em>" : blocked ? "<em>Cookie 已失效，已移出生产线</em>" : ""}`
+    ${account.free_plan ? "<em>当前套餐：免费 5 GB，已移出生产池</em>" : limitReached ? `<em>隐私邮箱数量已达到上游上限（${escapeHtml(account.alias_limit_reason || "-41012")}），已移出生产池</em>` : blocked ? "<em>Cookie 已失效，已移出生产线</em>" : ""}`
     : state.accounts.length && state.accounts.every((item) => item.free_plan)
       ? "<em>免费 5 GB 账号已移出生产池，暂无可生产账号</em>" : "";
   byId("productionCount").max = remaining > 0 ? 1 : 1;

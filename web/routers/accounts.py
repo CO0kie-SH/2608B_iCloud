@@ -16,11 +16,12 @@ def _account_out(acc, db: AliasDB) -> AccountOut:
     inbox = acc.resolve_inbox()
     flag = db.get_account_flag(acc.name) or {}
     cookie_invalid = bool(flag.get("cookie_invalid")) or not bool(acc.ok)
+    alias_limit_reached = bool(flag.get("alias_limit_reached")) or not capacity.allowed
     return AccountOut(
         name=acc.name,
         mail=acc.mail or "",
         apple_id=acc.apple_id or "",
-        hme_ok=bool(acc.ok) and not cookie_invalid and not flag.get("free_plan", False),
+        hme_ok=bool(acc.ok) and not cookie_invalid and not flag.get("free_plan", False) and not alias_limit_reached,
         free_plan=bool(flag.get("free_plan")),
         plan_name=str(flag.get("plan_name") or ""),
         plan_checked_at=int(flag.get("plan_checked_at") or 0),
@@ -33,7 +34,7 @@ def _account_out(acc, db: AliasDB) -> AccountOut:
         alias_pending=capacity.pending,
         alias_limit=capacity.limit,
         alias_remaining=capacity.remaining,
-        alias_limit_reached=not capacity.allowed,
+        alias_limit_reached=alias_limit_reached,
         mail_count=db.count_mails(account=acc.name),
         quota_used=quota.used,
         quota_limit=quota.limit,

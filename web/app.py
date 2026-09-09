@@ -14,6 +14,7 @@ from web.auth import (
     AuthGateMiddleware,
     create_auth_router,
     current_user,
+    current_user_is_admin,
     load_auth_settings,
 )
 from web.deps import get_db, get_settings, web_dir
@@ -60,7 +61,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="2608B iCloud 邮箱池子",
         description="HME 隐私邮箱池 + 邮件收取与分类展示",
-        version="26.9.9A",
+        version="26.9.9D",
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         lifespan=lifespan,
@@ -75,6 +76,8 @@ def create_app() -> FastAPI:
             "domain": settings.domain,
             "auth_user": current_user(request),
             "auth_disabled": auth_settings.disabled,
+            "auth_role": "admin" if auth_settings.disabled or current_user_is_admin(request, auth_settings) else "user",
+            "is_admin": auth_settings.disabled or current_user_is_admin(request, auth_settings),
         }
         ctx.update(extra)
         return templates.TemplateResponse(request=request, name=name, context=ctx)
@@ -118,6 +121,10 @@ def create_app() -> FastAPI:
     @app.get("/claims", response_class=HTMLResponse)
     def claims_page(request: Request) -> HTMLResponse:
         return render(request, "claims.html")
+
+    @app.get("/claim-policy", response_class=HTMLResponse)
+    def claim_policy_page(request: Request) -> HTMLResponse:
+        return render(request, "claim_policy.html")
 
     @app.get("/production", response_class=HTMLResponse)
     def production_page(request: Request) -> HTMLResponse:

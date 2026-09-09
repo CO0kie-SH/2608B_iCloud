@@ -208,6 +208,9 @@ def submit_production(
             )
         try:
             result = runner(progress)
+            result_errors = list(getattr(result, "errors", None) or [])
+            if any("-41012" in str(item) for item in result_errors):
+                db.mark_account_alias_limit_reached(account_label, reason="-41012")
             with _LOCK:
                 network = list(getattr(result, "network", None) or [])
                 job.result = {
@@ -215,13 +218,13 @@ def submit_production(
                     "threads": result.threads,
                     "created": result.created,
                     "items": result.items,
-                    "errors": result.errors,
+                    "errors": result_errors,
                     "network": network,
                     "network_summary": summarize_network(network),
                 }
-                job.status = "done" if result.created or not result.errors else "error"
-                if result.errors:
-                    job.error = "; ".join(result.errors)
+                job.status = "done" if result.created or not result_errors else "error"
+                if result_errors:
+                    job.error = "; ".join(result_errors)
                 db.update_production_job(
                     job.job_id,
                     status=job.status,
@@ -230,6 +233,8 @@ def submit_production(
                     error=job.error,
                 )
         except Exception as exc:
+            if "-41012" in str(exc):
+                db.mark_account_alias_limit_reached(account_label, reason="-41012")
             with _LOCK:
                 job.status = "error"
                 job.error = f"{type(exc).__name__}: {exc}"

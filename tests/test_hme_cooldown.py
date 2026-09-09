@@ -102,7 +102,7 @@ class HMECooldownTests(unittest.TestCase):
 
         self.assert_no_cooldown()
 
-    def test_740_aliases_reject_before_upstream_creation(self) -> None:
+    def test_750_aliases_reject_before_upstream_creation(self) -> None:
         self.insert_aliases(HME_ACCOUNT_ALIAS_LIMIT)
         service = HMEService(FakeClient(), db=self.db)
 
@@ -113,7 +113,7 @@ class HMECooldownTests(unittest.TestCase):
         self.assertEqual(raised.exception.alias_count, HME_ACCOUNT_ALIAS_LIMIT)
         self.assertEqual(self.db.get_create_quota(self.account).used, 0)
 
-    def test_pending_claim_prevents_739_alias_concurrency_overflow(self) -> None:
+    def test_pending_claim_prevents_749_alias_concurrency_overflow(self) -> None:
         self.insert_aliases(HME_ACCOUNT_ALIAS_LIMIT - 1)
         claim_id = self.db.claim_create_slot(self.account)
 

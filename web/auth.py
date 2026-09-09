@@ -36,6 +36,7 @@ class AuthSettings:
     session_max_age: int
     password_hashes: dict[str, str]
     trust_proxy: bool
+    admin_users: frozenset[str]
 
 
 def _env_str(key: str, default: str = "") -> str:
@@ -116,7 +117,23 @@ def load_auth_settings() -> AuthSettings:
         session_max_age=max(60, _env_int("AUTH_SESSION_MAX_AGE", 7 * 24 * 3600)),
         password_hashes=hashes,
         trust_proxy=_env_bool("AUTH_TRUST_PROXY", False),
+        admin_users=frozenset(
+            item.strip().lower()
+            for item in _env_str("AUTH_ADMIN_USERS", "lws").split(",")
+            if item.strip()
+        ),
     )
+
+
+def is_admin_user(user: str | None, auth_settings: AuthSettings | None = None) -> bool:
+    """服务端角色判断；默认 lws 管理员，角色不由客户端 cookie 控制。"""
+    if auth_settings is None:
+        auth_settings = load_auth_settings()
+    return bool(user and user.strip().lower() in auth_settings.admin_users)
+
+
+def current_user_is_admin(request: Request, auth_settings: AuthSettings | None = None) -> bool:
+    return is_admin_user(current_user(request), auth_settings)
 
 
 class LoginRateLimiter:

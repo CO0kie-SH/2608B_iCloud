@@ -300,7 +300,7 @@ class ProductionLoopTests(unittest.TestCase):
         self.assertEqual(state["submitted"], 0)
         self.assertEqual(state["failed"], 0)
         self.assertEqual(state["skipped"], 1)
-        self.assertTrue(any("740/740" in line and "跳过" in line for line in state["progress"]))
+        self.assertTrue(any("750/750" in line and "跳过" in line for line in state["progress"]))
 
     def test_stop_waits_for_current_job_then_finishes(self) -> None:
         account = self.account("a@icloud.com")

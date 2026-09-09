@@ -63,6 +63,52 @@ class ClaimPoolTests(unittest.TestCase):
         self.assertEqual(pool["available"], 4)
         self.assertEqual(pool["claimed"], 1)
 
+    def test_claim_whitelist_and_blacklist_filter_without_config_file(self) -> None:
+        for account, prefix in (("user002@icloud.com", "KEEP"), ("user003@icloud.com", "DROP")):
+            for i in range(2):
+                self.db.upsert_alias(
+                    account=account,
+                    parent_mail=account,
+                    hme=f"{prefix.lower()}{i}@icloud.com",
+                    label=f"{prefix}_L{i}",
+                    is_active=True,
+                    source="test",
+                )
+
+        order = self.db.claim_aliases(
+            count=2,
+            contact_email="me@example.com",
+            whitelist={"accounts": ["user002@icloud.com"]},
+            blacklist={"label_prefixes": ["DROP"]},
+        )
+        self.assertEqual(
+            [item["account"] for item in order["items"]],
+            ["user002@icloud.com", "user002@icloud.com"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "当前仅剩 0 个"):
+            self.db.claim_aliases(
+                count=1,
+                contact_email="me@example.com",
+                whitelist={"accounts": ["user003@icloud.com"]},
+                blacklist={"hmes": ["drop0@icloud.com", "drop1@icloud.com"]},
+            )
+
+    def test_saved_database_policy_is_applied_by_default(self) -> None:
+        self.db.upsert_alias(account="user002@icloud.com", parent_mail="user002@icloud.com", hme="allow@icloud.com", label="OK", source="test")
+        self.db.upsert_alias(account="user003@icloud.com", parent_mail="user003@icloud.com", hme="deny@icloud.com", label="OK", source="test")
+        self.db.save_claim_policy(
+            whitelist={"accounts": ["user002@icloud.com\nuser003@icloud.com"]},
+            blacklist={"hmes": ["deny@icloud.com"]},
+            updated_by="lws",
+        )
+        self.assertEqual(
+            self.db.get_claim_policy()["whitelist"]["accounts"],
+            ["user002@icloud.com", "user003@icloud.com"],
+        )
+        order = self.db.claim_aliases(count=1, contact_email="me@example.com")
+        self.assertEqual(order["emails"], ["allow@icloud.com"])
+
 
 class ClaimApiTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -144,6 +190,70 @@ class ClaimApiTests(unittest.TestCase):
         page = self.client.get("/claims")
         self.assertEqual(page.status_code, 200)
         self.assertIn("领取确认", page.text)
+
+    def test_checkout_passes_whitelist_and_blacklist_to_database(self) -> None:
+        for account, hme in (
+            ("user002@icloud.com", "allow@icloud.com"),
+            ("user003@icloud.com", "deny@icloud.com"),
+        ):
+            self.db.upsert_alias(
+                account=account,
+                parent_mail=account,
+                hme=hme,
+                label="TEST",
+                is_active=True,
+                source="test",
+            )
+        res = self.client.post(
+            "/api/claims/checkout",
+            json={
+                "count": 1,
+                "contact_email": "buyer@example.com",
+                "send_email": False,
+                "whitelist": {"accounts": ["user002@icloud.com", "user003@icloud.com"]},
+                "blacklist": {"hmes": ["deny@icloud.com"]},
+            },
+        )
+        self.assertEqual(res.status_code, 200, res.text)
+        self.assertEqual(res.json()["emails"], ["allow@icloud.com"])
+
+    def test_checkout_rejects_non_object_policy(self) -> None:
+        res = self.client.post(
+            "/api/claims/checkout",
+            json={"count": 1, "contact_email": "buyer@example.com", "whitelist": ["x"]},
+        )
+        self.assertEqual(res.status_code, 400)
+        self.assertIn("whitelist", res.json()["detail"])
+
+    def test_only_admin_can_modify_global_policy(self) -> None:
+        # 隔离角色配置，验证服务端权限判断，不依赖运行环境的管理员名单。
+        with mock.patch("web.routers.claims.is_admin_user", side_effect=lambda user, _settings: user == "lws"):
+            saved = self.client.put(
+                "/api/claims/policy",
+                json={"whitelist": {"accounts": ["user001@icloud.com"]}, "blacklist": {}},
+            )
+            self.assertEqual(saved.status_code, 200, saved.text)
+            self.assertEqual(saved.json()["updated_by"], "lws")
+
+            self.client.get("/logout")
+            login = self.client.post(
+                "/login",
+                data={"username": "mhw", "password": os.environ["AUTH_PASSWORD_MHW"], "next": "/"},
+                follow_redirects=False,
+            )
+            self.assertEqual(login.status_code, 302)
+            visible = self.client.get("/api/claims/policy")
+            self.assertEqual(visible.status_code, 200)
+            forbidden = self.client.put(
+                "/api/claims/policy",
+                json={"whitelist": {}, "blacklist": {"hmes": ["TARGET@icloud.com"]}},
+            )
+            self.assertEqual(forbidden.status_code, 403)
+
+    def test_claim_policy_page_is_available_to_authenticated_user(self) -> None:
+        page = self.client.get("/claim-policy")
+        self.assertEqual(page.status_code, 200)
+        self.assertIn("领取黑白名单", page.text)
 
 
 if __name__ == "__main__":

@@ -16,12 +16,13 @@ def production_options_data(accounts: list[Any], *, settings: Any, db: Any) -> d
         capacity = db.get_alias_capacity(account.name)
         flag = db.get_account_flag(account.name) or {}
         cookie_invalid = bool(flag.get("cookie_invalid")) or not bool(account.ok)
+        alias_limit_reached = bool(flag.get("alias_limit_reached")) or not capacity.allowed
         items.append(
             {
                 "name": account.name,
                 "mail": account.mail,
                 "icloud_domain": settings_for_account(settings, account).domain,
-                "hme_ok": bool(account.ok) and not cookie_invalid and not flag.get("free_plan", False),
+                "hme_ok": bool(account.ok) and not cookie_invalid and not flag.get("free_plan", False) and not alias_limit_reached,
                 "free_plan": bool(flag.get("free_plan")),
                 "plan_name": str(flag.get("plan_name") or ""),
                 "plan_checked_at": int(flag.get("plan_checked_at") or 0),
@@ -36,7 +37,8 @@ def production_options_data(accounts: list[Any], *, settings: Any, db: Any) -> d
                 "alias_pending": capacity.pending,
                 "alias_limit": capacity.limit,
                 "alias_remaining": capacity.remaining,
-                "alias_limit_reached": not capacity.allowed,
+                "alias_limit_reached": alias_limit_reached,
+                "alias_limit_reason": str(flag.get("alias_limit_reason") or ""),
                 "last_produce_at": quota.last_produce_at,
                 "next_produce_at": quota.next_produce_at,
             }

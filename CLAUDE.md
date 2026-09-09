@@ -48,7 +48,7 @@ iCloud Hide My Email（HME）隐私邮箱池 + 邮件收取。CLI 在 `main.py`�
 
 | 项 | 值 |
 |----|-----|
-| 版本 | 26.9.9A |
+| 版本 | 26.9.9D |
 | Python | 3.11+ |
 | Web | FastAPI / Jinja2 / SQLite |
 | 仓库 | https://github.com/CO0kie-SH/2608B_iCloud |
@@ -90,3 +90,4 @@ start_web.bat
 | 日期 | 范围 | 完成内容与验证摘要 |
 |------|------|--------------------|
 | 2026-09-09 | Web 登录 / 发版 | 工作台会话登录（lws/mhw）、文档与 GitHub Release 26.9.9A；`python -m unittest tests.test_web_auth tests.test_claims -v` 11 项通过 |
+| 2026-09-09 | HME 上游上限 | `-41012` 持久化为 `alias_limit_reached`，自动移出生产池；相关单元测试与编译检查通过 |

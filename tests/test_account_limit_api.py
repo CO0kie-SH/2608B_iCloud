@@ -16,14 +16,14 @@ class AccountLimitAPITests(unittest.TestCase):
 
         @app.get("/limit")
         def account_limit() -> None:
-            raise HMEAccountAliasLimitError("owner@icloud.com", 740)
+            raise HMEAccountAliasLimitError("owner@icloud.com", 750)
 
         with TestClient(app) as client:
             response = client.get("/limit")
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(response.json()["error"]["code"], "HME_ACCOUNT_LIMIT")
-        self.assertIn("740/740", response.json()["error"]["message"])
+        self.assertIn("750/750", response.json()["error"]["message"])
         self.assertNotIn("retry-after", response.headers)
 
 

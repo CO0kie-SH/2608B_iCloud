@@ -214,7 +214,7 @@ function renderAccounts() {
           <span class="mini">邮件 <b>${a.mail_count}</b></span>
           <span class="${quotaCls}">1h <b>${a.quota_used}/${a.quota_limit}</b>${waitMin ? ` · ${waitMin}m` : ""}</span>
         </div>
-        ${a.free_plan ? '<div class="warn-text">当前套餐：免费 5 GB，已移出生产池</div>' : a.cookie_invalid || !a.hme_ok ? `<div class="warn-text">Cookie 已失效（${escapeHtml(a.cookie_invalid_reason || "cookie_invalid")}），已移出生产线；请运行 cookie-login</div>` : ""}
+        ${a.free_plan ? '<div class="warn-text">当前套餐：免费 5 GB，已移出生产池</div>' : a.alias_limit_reached ? `<div class="warn-text">隐私邮箱数量已达到上游上限（${escapeHtml(a.alias_limit_reason || "-41012")}），已移出生产池</div>` : a.cookie_invalid || !a.hme_ok ? `<div class="warn-text">Cookie 已失效（${escapeHtml(a.cookie_invalid_reason || "cookie_invalid")}），已移出生产线；请运行 cookie-login</div>` : ""}
         ${!a.mail_ready ? `<div class="warn-text">未配置此收件地址对应的 provider 密码</div>` : ""}
       </div>`;
   }).join("");

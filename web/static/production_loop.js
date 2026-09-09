@@ -130,7 +130,7 @@ function renderConfig(snapshot) {
   const selected = new Set(loopState.selectionDraft ?? snapshot.selected_accounts ?? []);
   const eligible = (snapshot.accounts || []).some((account) => selected.has(account.name)
     && account.hme_ok && !account.cookie_invalid && !account.alias_limit_reached
-    && Number(account.alias_count || 0) < Number(account.alias_limit || 740));
+    && Number(account.alias_count || 0) < Number(account.alias_limit || 750));
   byId("loopStart").disabled = active || !eligible;
   byId("loopStop").disabled = !active || snapshot.status === "stopping";
 }
@@ -141,7 +141,7 @@ function renderAccounts(snapshot) {
   rows.innerHTML = (snapshot.accounts || []).map((account) => {
     const aliasCount = Math.max(0, Number(account.alias_count) || 0);
     const aliasPending = Math.max(0, Number(account.alias_pending) || 0);
-    const aliasLimit = Math.max(1, Number(account.alias_limit) || 740);
+    const aliasLimit = Math.max(1, Number(account.alias_limit) || 750);
     const limitReached = Boolean(account.alias_limit_reached || aliasCount >= aliasLimit);
     const ready = account.hme_ok && !account.cookie_invalid && !limitReached;
     const status = account.free_plan ? "免费 5 GB，已移出" : limitReached ? `已达 ${aliasLimit} 上限` : ready ? "可用" : "Cookie 无效";
@@ -315,7 +315,7 @@ byId("loopRefresh").addEventListener("click", () => refresh());
 byId("loopSelectReady").addEventListener("click", () => {
   const ready = new Set((loopState.snapshot?.accounts || []).filter((item) => {
     const count = Math.max(0, Number(item.alias_count) || 0);
-    const limit = Math.max(1, Number(item.alias_limit) || 740);
+    const limit = Math.max(1, Number(item.alias_limit) || 750);
     return item.hme_ok && !item.cookie_invalid && !item.alias_limit_reached && count < limit;
   }).map((item) => item.name));
   setSelection(ready).catch(() => {});

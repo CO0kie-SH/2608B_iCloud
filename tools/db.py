@@ -488,6 +488,9 @@ class AliasDB:
                 ("free_plan", "INTEGER NOT NULL DEFAULT 0"),
                 ("plan_name", "TEXT NOT NULL DEFAULT ''"),
                 ("plan_checked_at", "INTEGER NOT NULL DEFAULT 0"),
+                ("alias_limit_reached", "INTEGER NOT NULL DEFAULT 0"),
+                ("alias_limit_reason", "TEXT NOT NULL DEFAULT ''"),
+                ("alias_limit_marked_at", "INTEGER NOT NULL DEFAULT 0"),
             ):
                 if column not in flag_cols:
                     conn.execute(f"ALTER TABLE account_flags ADD COLUMN {column} {declaration}")
@@ -709,6 +712,21 @@ class AliasDB:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS claim_policy (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    whitelist_json TEXT NOT NULL DEFAULT '{}',
+                    blacklist_json TEXT NOT NULL DEFAULT '{}',
+                    updated_at TEXT NOT NULL,
+                    updated_by TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO claim_policy (id, updated_at) VALUES (1, ?)",
+                (utc_now(),),
+            )
             item_cols = self._table_columns(conn, "claim_order_items")
             if "access_token" not in item_cols:
                 conn.execute(
@@ -863,10 +881,21 @@ class AliasDB:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             flag = conn.execute(
-                "SELECT free_plan FROM account_flags WHERE account = ?", (account,)
+                "SELECT free_plan, alias_limit_reached FROM account_flags WHERE account = ?",
+                (account,),
             ).fetchone()
             if flag and flag["free_plan"]:
                 raise ICloudFreePlanError(account)
+            if flag and flag["alias_limit_reached"]:
+                alias_row = conn.execute(
+                    "SELECT COUNT(*) AS total FROM aliases WHERE account = ? OR parent_mail = ?",
+                    (account, account),
+                ).fetchone()
+                raise HMEAccountAliasLimitError(
+                    account=account,
+                    alias_count=int(alias_row["total"] or 0),
+                    limit=HME_ACCOUNT_ALIAS_LIMIT,
+                )
             conn.execute("DELETE FROM create_claims WHERE claimed_at < ?", (since_s,))
             last = conn.execute(
                 """
@@ -1153,7 +1182,7 @@ class AliasDB:
             conn.execute("BEGIN IMMEDIATE")
             if "selected_accounts_json" in normalized:
                 blocked = {row["account"] for row in conn.execute(
-                    "SELECT account FROM account_flags WHERE free_plan = 1"
+                    "SELECT account FROM account_flags WHERE free_plan = 1 OR alias_limit_reached = 1"
                 )}
                 selected = json.loads(normalized["selected_accounts_json"])
                 normalized["selected_accounts_json"] = json.dumps(
@@ -1263,11 +1292,89 @@ class AliasDB:
                     (json.dumps([name for name in selected if name != account], ensure_ascii=False), now),
                 )
 
+    def mark_account_alias_limit_reached(
+        self, account: str, reason: str = "-41012"
+    ) -> dict[str, Any]:
+        """持久化上游返回的 HME 地址总量已满状态，并移出生产轮询池。"""
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        now = utc_now()
+        now_unix = unix_now()
+        reason = (reason or "-41012")[:200]
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_flags (
+                    account, alias_limit_reached, alias_limit_reason,
+                    alias_limit_marked_at, updated_at
+                ) VALUES (?, 1, ?, ?, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    alias_limit_reached=1,
+                    alias_limit_reason=excluded.alias_limit_reason,
+                    alias_limit_marked_at=excluded.alias_limit_marked_at,
+                    updated_at=excluded.updated_at
+                """,
+                (account, reason, now_unix, now),
+            )
+            row = conn.execute(
+                "SELECT selected_accounts_json FROM production_loop_state WHERE id = 1"
+            ).fetchone()
+            selected = json.loads(row["selected_accounts_json"]) if row else []
+            conn.execute(
+                "UPDATE production_loop_state SET selected_accounts_json = ?, updated_at = ? WHERE id = 1",
+                (json.dumps([name for name in selected if name != account], ensure_ascii=False), now),
+            )
+            conn.commit()
+        return self.get_account_flag(account) or {
+            "account": account,
+            "alias_limit_reached": True,
+            "alias_limit_reason": reason,
+            "alias_limit_marked_at": now_unix,
+        }
+
+    def clear_account_alias_limit(self, account: str) -> dict[str, Any]:
+        """人工确认上游已释放名额后，清除地址总量已满标记。"""
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_flags (
+                    account, alias_limit_reached, alias_limit_reason,
+                    alias_limit_marked_at, updated_at
+                ) VALUES (?, 0, '', 0, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    alias_limit_reached=0,
+                    alias_limit_reason='',
+                    alias_limit_marked_at=0,
+                    updated_at=excluded.updated_at
+                """,
+                (account, now),
+            )
+            conn.commit()
+        return self.get_account_flag(account) or {
+            "account": account,
+            "alias_limit_reached": False,
+            "alias_limit_reason": "",
+            "alias_limit_marked_at": 0,
+        }
+
     def assert_production_ready(self, account: str) -> None:
         self.assert_cookie_ready(account)
         flag = self.get_account_flag(account)
         if flag and flag["free_plan"]:
             raise ICloudFreePlanError(account)
+        if flag and flag.get("alias_limit_reached"):
+            capacity = self.get_alias_capacity(account)
+            raise HMEAccountAliasLimitError(
+                account=account,
+                alias_count=capacity.alias_count,
+                limit=capacity.limit,
+                pending=capacity.pending,
+            )
 
     def clear_account_free_plan(self, account: str) -> dict[str, Any]:
         """人工解除免费套餐标记，使账号重新允许加入生产池。"""
@@ -1315,6 +1422,9 @@ class AliasDB:
             "free_plan": bool(row["free_plan"]),
             "plan_name": row["plan_name"] or "",
             "plan_checked_at": int(row["plan_checked_at"] or 0),
+            "alias_limit_reached": bool(row["alias_limit_reached"]),
+            "alias_limit_reason": row["alias_limit_reason"] or "",
+            "alias_limit_marked_at": int(row["alias_limit_marked_at"] or 0),
             "updated_at": row["updated_at"] or "",
         }
 
@@ -1421,7 +1531,8 @@ class AliasDB:
 
     def assert_alias_capacity(self, account: str) -> AliasCapacity:
         capacity = self.get_alias_capacity(account)
-        if not capacity.allowed:
+        flag = self.get_account_flag(account)
+        if not capacity.allowed or (flag and flag.get("alias_limit_reached")):
             raise HMEAccountAliasLimitError(
                 account=capacity.account,
                 alias_count=capacity.alias_count,
@@ -1507,6 +1618,75 @@ class AliasDB:
             "orders": orders,
         }
 
+    @staticmethod
+    def _normalize_claim_policy(policy: dict[str, Any] | None) -> dict[str, list[str]]:
+        policy = policy or {}
+        allowed = ("accounts", "hmes", "cdks", "label_prefixes")
+        result: dict[str, list[str]] = {}
+        for key in allowed:
+            raw = policy.get(key, [])
+            if isinstance(raw, str):
+                raw = [raw]
+            if raw is None:
+                raw = []
+            if not isinstance(raw, (list, tuple, set)):
+                raise ValueError(f"{key} 必须是字符串列表")
+            values: list[str] = []
+            for item in raw:
+                # 页面 textarea 以换行分隔；同时兼容 API 传入的多行字符串。
+                values.extend(
+                    part.strip().lower()
+                    for part in str(item).replace("\r", "").split("\n")
+                    if part.strip()
+                )
+            if len(values) > 1000:
+                raise ValueError(f"{key} 最多 1000 项")
+            result[key] = list(dict.fromkeys(values))
+        return result
+
+    def get_claim_policy(self) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM claim_policy WHERE id = 1").fetchone()
+        if not row:
+            return {"whitelist": {}, "blacklist": {}, "updated_at": "", "updated_by": ""}
+        try:
+            whitelist = json.loads(row["whitelist_json"] or "{}")
+            blacklist = json.loads(row["blacklist_json"] or "{}")
+        except (TypeError, ValueError):
+            whitelist, blacklist = {}, {}
+        return {
+            "whitelist": self._normalize_claim_policy(whitelist),
+            "blacklist": self._normalize_claim_policy(blacklist),
+            "updated_at": row["updated_at"] or "",
+            "updated_by": row["updated_by"] or "",
+        }
+
+    def save_claim_policy(
+        self,
+        *,
+        whitelist: dict[str, Any] | None,
+        blacklist: dict[str, Any] | None,
+        updated_by: str = "",
+    ) -> dict[str, Any]:
+        allow = self._normalize_claim_policy(whitelist)
+        deny = self._normalize_claim_policy(blacklist)
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO claim_policy (id, whitelist_json, blacklist_json, updated_at, updated_by)
+                VALUES (1, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    whitelist_json=excluded.whitelist_json,
+                    blacklist_json=excluded.blacklist_json,
+                    updated_at=excluded.updated_at,
+                    updated_by=excluded.updated_by
+                """,
+                (json.dumps(allow, ensure_ascii=False), json.dumps(deny, ensure_ascii=False), now, updated_by),
+            )
+            conn.commit()
+        return self.get_claim_policy()
+
     def _new_claim_order_no(self, conn: sqlite3.Connection) -> str:
         for _ in range(12):
             stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
@@ -1564,6 +1744,8 @@ class AliasDB:
         contact_email: str,
         note: str = "",
         account: str | None = None,
+        whitelist: dict[str, Any] | None = None,
+        blacklist: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         原子领取 count 个未占用且仍启用的隐私邮箱。
@@ -1581,6 +1763,23 @@ class AliasDB:
         if len(note_text) > 200:
             raise ValueError("备注最多 200 字")
         account_filter = (account or "").strip() or None
+
+        stored = self.get_claim_policy()
+        requested_allow = self._normalize_claim_policy(whitelist)
+        requested_deny = self._normalize_claim_policy(blacklist)
+        stored_allow = stored["whitelist"]
+        stored_deny = stored["blacklist"]
+        # 多层白名单取交集；黑名单取并集，用户请求只能进一步收窄范围。
+        allow = {
+            key: (list(set(stored_allow[key]) & set(requested_allow[key]))
+                  if stored_allow[key] and requested_allow[key]
+                  else stored_allow[key] or requested_allow[key])
+            for key in stored_allow
+        }
+        deny = {
+            key: list(dict.fromkeys(stored_deny[key] + requested_deny[key]))
+            for key in stored_deny
+        }
         now = utc_now()
 
         with self._connect() as conn:
@@ -1597,24 +1796,32 @@ class AliasDB:
             if account_filter:
                 sql += " AND (a.account = ? OR a.parent_mail = ?)"
                 params.extend([account_filter, account_filter])
+
+            column_map = {"accounts": "a.account", "hmes": "a.hme", "cdks": "a.cdk"}
+            for key, column in column_map.items():
+                if allow[key]:
+                    marks = ",".join("?" for _ in allow[key])
+                    sql += f" AND lower(COALESCE({column}, '')) IN ({marks})"
+                    params.extend(allow[key])
+                if deny[key]:
+                    marks = ",".join("?" for _ in deny[key])
+                    sql += f" AND lower(COALESCE({column}, '')) NOT IN ({marks})"
+                    params.extend(deny[key])
+            for key in ("label_prefixes",):
+                if allow[key]:
+                    sql += " AND (" + " OR ".join("lower(COALESCE(a.label, '')) LIKE ?" for _ in allow[key]) + ")"
+                    params.extend(value + "%" for value in allow[key])
+                if deny[key]:
+                    sql += " AND NOT (" + " OR ".join("lower(COALESCE(a.label, '')) LIKE ?" for _ in deny[key]) + ")"
+                    params.extend(value + "%" for value in deny[key])
             sql += " ORDER BY a.id ASC LIMIT ?"
             params.append(want)
             rows = conn.execute(sql, params).fetchall()
             if len(rows) < want:
-                free = int(
-                    conn.execute(
-                        """
-                        SELECT COUNT(*) AS n
-                        FROM aliases a
-                        WHERE a.is_active != 0
-                          AND NOT EXISTS (
-                              SELECT 1 FROM claim_order_items c
-                              WHERE lower(c.hme) = lower(a.hme)
-                          )
-                        """
-                    ).fetchone()["n"]
-                    or 0
+                count_sql = sql.rsplit(" ORDER BY a.id ASC LIMIT ?", 1)[0].replace(
+                    "SELECT a.id, a.hme, a.account, a.parent_mail, a.label, a.cdk", "SELECT COUNT(*) AS n", 1
                 )
+                free = int(conn.execute(count_sql, params[:-1]).fetchone()["n"] or 0)
                 raise ValueError(f"可领邮箱不足：需要 {want} 个，当前仅剩 {free} 个")
 
             order_no = self._new_claim_order_no(conn)

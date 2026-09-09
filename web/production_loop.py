@@ -417,6 +417,10 @@ class ProductionLoopController:
                         if "ICLOUD_FREE_PLAN" in detail:
                             self._increment(skipped=1)
                             self._append_progress(f"移出生产池 {name}：当前套餐为免费 5 GB")
+                        elif "-41012" in detail:
+                            self.db.mark_account_alias_limit_reached(name, reason="-41012")
+                            self._increment(skipped=1)
+                            self._append_progress(f"移出生产池 {name}：上游返回 -41012，隐私邮箱数量已达上限")
                         elif "HME_ACCOUNT_LIMIT" in detail:
                             self._increment(skipped=1)
                             self._append_progress(f"任务跳过 {name}：{detail}")

@@ -17,6 +17,7 @@ from tools.client import ICloudError, ICloudHMEClient
 from tools.db import AliasDB
 from tools.hme import HMEService
 from tools.icloud_plan import FREE_STORAGE_BYTES, PLAN_SOURCES, ICloudFreePlanError, ICloudPlan
+from tools.rate_limit import HMEAccountAliasLimitError
 from tools.production import produce_aliases
 from web.errors import register_error_handlers
 from web.production_service import production_options_data, submit_account_production
@@ -221,6 +222,18 @@ class ICloudPlanProductionTests(unittest.TestCase):
                 submit_account_production(self.account, interface="legacy", count=1, threads=1,
                                           settings=self.settings, db=self.db)
             submit.assert_not_called()
+
+    def test_upstream_41012_marks_account_at_alias_limit(self) -> None:
+        self.db.update_production_loop_state(selected_accounts=[self.account.name, "other"])
+        flag = self.db.mark_account_alias_limit_reached(self.account.name)
+        self.assertTrue(flag["alias_limit_reached"])
+        self.assertEqual(self.db.get_production_loop_state()["selected_accounts"], ["other"])
+        item = production_options_data([self.account], settings=self.settings, db=self.db)["accounts"][0]
+        self.assertTrue(item["alias_limit_reached"])
+        self.assertFalse(item["hme_ok"])
+        with self.assertRaises(HMEAccountAliasLimitError):
+            submit_account_production(self.account, interface="legacy", count=1, threads=1,
+                                      settings=self.settings, db=self.db)
 
     def test_pipeline_records_plan_failure_and_followup_network_attempts(self) -> None:
         with self.client() as client, patch.object(client.session, "request", side_effect=[

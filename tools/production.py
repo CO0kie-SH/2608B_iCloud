@@ -150,6 +150,8 @@ def produce_aliases(
                 if callable(on_progress):
                     on_progress(f"{account.name}：失败，{errors[-1]}")
     items.sort(key=lambda item: item["created_at"])
+    if any("-41012" in error for error in errors):
+        db.mark_account_alias_limit_reached(account_name, reason="-41012")
     return ProductionResult(
         requested=count,
         threads=threads,

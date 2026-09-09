@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_name }} · 领取策略</title>
+<link rel="stylesheet" href="/static/app.css?v=20260909-policy">
+</head>
+<body data-admin="{{ 'true' if is_admin else 'false' }}">
+<header class="topbar">
+  <div class="brand"><span class="logo">⚙</span><div><div class="brand-name">{{ app_name }}</div><div class="brand-sub">领取黑白名单</div></div></div>
+  <nav class="page-nav"><a href="/">首页</a><a href="/claims">领取邮箱</a><a class="active" href="/claim-policy">领取策略</a><a href="/production">生产</a></nav>
+  <div class="topbar-actions">{% if auth_user %}<span class="topbar-user-name">{{ auth_user }} · {{ auth_role }}</span><a class="btn btn-ghost nav-button" href="/logout">退出</a>{% endif %}</div>
+</header>
+<main class="production-layout">
+  <section class="production-panel">
+    <div class="col-head"><h1>领取黑白名单</h1><span id="policyRole" class="badge">加载中</span></div>
+    <p class="settings-hint">管理员策略保存于 SQLite。黑名单优先排除；白名单填写后只允许匹配项。每行一个值。</p>
+    <form id="policyForm" class="production-form">
+      <h3>白名单（允许范围）</h3>
+      <label class="field-stack"><span class="field-label">母号 accounts</span><textarea data-policy="whitelist.accounts" rows="3" placeholder="maohongwei001@icloud.com"></textarea></label>
+      <label class="field-stack"><span class="field-label">隐私邮箱 hmes</span><textarea data-policy="whitelist.hmes" rows="3"></textarea></label>
+      <label class="field-stack"><span class="field-label">CDK</span><textarea data-policy="whitelist.cdks" rows="3"></textarea></label>
+      <label class="field-stack"><span class="field-label">标签前缀 label_prefixes</span><textarea data-policy="whitelist.label_prefixes" rows="3" placeholder="CDK_"></textarea></label>
+      <h3>黑名单（排除范围）</h3>
+      <label class="field-stack"><span class="field-label">母号 accounts</span><textarea data-policy="blacklist.accounts" rows="3"></textarea></label>
+      <label class="field-stack"><span class="field-label">隐私邮箱 hmes</span><textarea data-policy="blacklist.hmes" rows="3"></textarea></label>
+      <label class="field-stack"><span class="field-label">CDK</span><textarea data-policy="blacklist.cdks" rows="3"></textarea></label>
+      <label class="field-stack"><span class="field-label">标签前缀 label_prefixes</span><textarea data-policy="blacklist.label_prefixes" rows="3"></textarea></label>
+      <div><button id="policySave" class="btn btn-primary" type="submit">保存策略</button><button id="policyReload" class="btn btn-ghost" type="button">重新加载</button></div>
+      <p id="policyMessage" class="claim-form-msg"></p>
+    </form>
+  </section>
+  <section class="production-panel"><h2>权限说明</h2><ul><li>管理员可修改全局策略。</li><li>普通用户仅可查看，服务端拒绝修改请求。</li><li>领取请求会叠加管理员策略，用户参数只能进一步缩小范围。</li></ul><p id="policyMeta" class="settings-hint"></p></section>
+</main>
+<script src="/static/claim_policy.js?v=20260909-1"></script>
+</body>
+</html>

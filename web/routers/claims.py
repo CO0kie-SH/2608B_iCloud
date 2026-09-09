@@ -12,6 +12,7 @@ from tools.claim_delivery import (
     public_base_url,
 )
 from tools.code_lookup import find_latest_code, maybe_sync_account
+from web.auth import current_user, is_admin_user, load_auth_settings
 from web.deps import get_accounts, get_db, get_mail_client, get_settings, resolve_account
 from web.schemas import (
     ClaimOrderOut,
@@ -20,6 +21,34 @@ from web.schemas import (
 )
 
 router = APIRouter(prefix="/api/claims", tags=["claims"])
+
+
+def _require_admin(request: Request) -> str:
+    user = current_user(request)
+    settings = load_auth_settings()
+    if settings.disabled:
+        return user or "disabled"
+    if not is_admin_user(user, settings):
+        raise HTTPException(status_code=403, detail="仅管理员可以修改领取策略")
+    return user or ""
+
+
+@router.get("/policy")
+def get_claim_policy() -> dict[str, Any]:
+    return get_db().get_claim_policy()
+
+
+@router.put("/policy")
+def save_claim_policy(request: Request, payload: dict[str, Any] = Body(default_factory=dict)) -> dict[str, Any]:
+    user = _require_admin(request)
+    whitelist = payload.get("whitelist", {})
+    blacklist = payload.get("blacklist", {})
+    if not isinstance(whitelist, dict) or not isinstance(blacklist, dict):
+        raise HTTPException(status_code=400, detail="whitelist 和 blacklist 必须是对象")
+    try:
+        return get_db().save_claim_policy(whitelist=whitelist, blacklist=blacklist, updated_by=user)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _request_base(request: Request | None) -> str:
@@ -125,6 +154,7 @@ def checkout(
     - contact_email: 常用邮箱，领取列表会发到这里（必填）
     - note: 备注（可选，替代安全密码）
     - account: 可选，只从某个母号池子领
+    - whitelist / blacklist: 可选，按 accounts/hmes/cdks/label_prefixes 筛选
     - sender_account: 可选，指定用哪个账户 SMTP 发信
     - send_email: 默认 true；false 只占用不发信
     """
@@ -136,6 +166,12 @@ def checkout(
     contact_email = str(payload.get("contact_email") or payload.get("email") or "").strip()
     note = str(payload.get("note") or "").strip()
     account = str(payload.get("account") or "").strip() or None
+    whitelist = payload.get("whitelist")
+    blacklist = payload.get("blacklist")
+    if whitelist is not None and not isinstance(whitelist, dict):
+        raise HTTPException(status_code=400, detail="whitelist 必须是对象")
+    if blacklist is not None and not isinstance(blacklist, dict):
+        raise HTTPException(status_code=400, detail="blacklist 必须是对象")
     send_email = payload.get("send_email", True)
     if isinstance(send_email, str):
         send_email = send_email.strip().lower() not in {"0", "false", "no", "off"}
@@ -148,6 +184,8 @@ def checkout(
             contact_email=contact_email,
             note=note,
             account=account,
+            whitelist=whitelist,
+            blacklist=blacklist,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
