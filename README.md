@@ -6,10 +6,22 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.9.9A** |
+| **版本** | **26.9.9B** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
 | **最后更新** | 2026-09-09 |
 | **仓库** | https://github.com/CO0kie-SH/2608B_iCloud |
+
+---
+
+## 版本 26.9.9B 变更摘要
+
+在 26.9.9A 工作台登录的基础上，补充 DuckDuckGo 邮件 Autofill 出口门禁、收件别名精简算法和相关文档测试，并修正首页池统计测试数据结构。
+
+| 模块 | 变更 |
+|------|------|
+| Duck 邮件 | 使用 Patchright + DuckDuckGo 扩展访问 Autofill 前先检查 mayips 出口国家；中国出口直接终止第二步访问 |
+| 收件别名 | 新增 `mail_alias/` 独立精简实现，记录地址解析优先级、VERP 解码规则和调用示例 |
+| 文档与测试 | 补充两步出口门禁说明、别名算法文档和对应回归测试 |
 
 ---
 
@@ -945,6 +957,8 @@ python main.py mail-send -a user001@icloud.com --to someone@example.com --subjec
 | `return_path_addr` | 信封退信地址（邮件投递失败时使用） |
 | `received_spf` / `envelope_from` | 完整 Received-SPF 头 / 从 SPF 或 Authentication-Results 抽取的信封发件地址 |
 | `recipient_alias` | Web 邮件接口与验证码 CSV 的解析收件别名；163 从 `envelope_from` VERP 提取，Apple/iCloud 与 Outlook 从 `return_path` VERP 提取 |
+
+收件别名的解析优先级、VERP 解码步骤及独立精简版见 [mail_alias/README.md](mail_alias/README.md)。
 
 ```python
 from tools.mail import get_mail_by_uid

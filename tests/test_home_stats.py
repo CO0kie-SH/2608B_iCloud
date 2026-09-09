@@ -27,7 +27,7 @@ class HomePoolStatsTests(unittest.TestCase):
 
             self.assertEqual(
                 db.get_alias_pool_stats(),
-                {"total": 4, "available": 3, "cdk_total": 3, "cdk_available": 2},
+                {"total": 4, "available": 3, "cdk_total": 3, "cdk_available": 2, "claimed": 0},
             )
 
     def test_empty_pool_returns_zeroes(self) -> None:
@@ -35,7 +35,7 @@ class HomePoolStatsTests(unittest.TestCase):
             stats = AliasDB(Path(temp_dir) / "aliases.db").get_alias_pool_stats()
             self.assertEqual(
                 stats,
-                {"total": 0, "available": 0, "cdk_total": 0, "cdk_available": 0},
+                {"total": 0, "available": 0, "cdk_total": 0, "cdk_available": 0, "claimed": 0},
             )
 
 

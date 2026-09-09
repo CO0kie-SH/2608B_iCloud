@@ -42,6 +42,25 @@ D:\0Code2\py312\python.exe -m duck.duck_browser --proxy socks5://HOST:PORT --hea
 重新加载扩展。没有 `--check` 时，有头会话会一直运行到窗口关闭；`--headless` 必须配合
 `--check`。
 
+## 两步出口门禁
+
+```powershell
+# 先检查 mayips 出口国家，再决定是否访问 Autofill
+D:\0Code2\py312\python.exe -m duck.email_autofill --headless
+
+# 临时使用直连，不修改 .env
+D:\0Code2\py312\python.exe -m duck.email_autofill --proxy direct --headless
+```
+
+`duck.email_autofill` 使用同一个 Patchright + DuckDuckGo 扩展会话，先访问
+`https://mayips.com/` 并解析 JSON 的 `country`：
+
+1. `country` 为 `CN` 时立即输出 `ERROR: 中国出口无法访问`，返回退出码 `1`，不创建第二个页面。
+2. 只有非 `CN` 国家才访问 `https://duckduckgo.com/email/settings/autofill`，等待页面完成后输出正文。
+
+页面网络错误会返回错误类型或 `net::ERR_*`；扩展运行期间持有更新锁，出现
+`Extension is in use` 时先关闭已启动的 DuckDuckGo 窗口。
+
 扩展运行期间持有更新锁。出现 `Extension is in use` 时，先关闭之前由项目脚本启动的
 DuckDuckGo 窗口，再运行本入口或 `bat/update_duckduckgo_extension.bat`。脚本在启动时
 动态获取扩展 ID；更换安装路径后 ID 可能变化，不应把测试日志中的 ID 固定在业务代码里。
