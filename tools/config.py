@@ -143,6 +143,8 @@ class Settings:
     log_dir: str
     base_dir: Path = BASE_DIR
     hme_proxy: str = ""
+    # 领取凭证里的取码 URL 根地址；空则默认 http://127.0.0.1:8770
+    public_base_url: str = ""
 
     @property
     def origin(self) -> str:
@@ -281,4 +283,5 @@ def load_settings(
         camoufox_proxy=str(value("CAMOUFOX_PROXY", "")).strip(),
         log_dir=str(value("LOG_DIR", "logs")).strip(),
         hme_proxy=str(value("HME_PROXY", "")).strip(),
+        public_base_url=str(value("PUBLIC_BASE_URL", "")).strip(),
     )

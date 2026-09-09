@@ -1,9 +1,18 @@
 # secrets / privacy
 .env
+auth_credentials.local.txt
 accounts/*
 !accounts/_example.yaml.example
 db/
 *.db
+*.bak
+sava/
+
+# local analysis dumps
+2026-09-06_*.md
+
+# release zip
+release/
 
 # local browser binaries + run logs
 browsers/

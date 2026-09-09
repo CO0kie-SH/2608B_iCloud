@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ app_name }} · 领取邮箱</title>
+<link rel="stylesheet" href="/static/app.css?v=20260908-claims">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">☰</span><div><div class="brand-name">{{ app_name }}</div><div class="brand-sub">本地领取 · 无真实消费</div></div></div>
+  <nav class="page-nav">
+    <a href="/">首页</a>
+    <a href="/mailbox">邮箱池子</a>
+    <a href="/mailcom">mail.com</a>
+    <a class="active" href="/claims">领取邮箱</a>
+    <a href="/production">生产</a>
+    <a href="/production-loop">轮询生产</a>
+  </nav>
+  <div class="topbar-user">
+    {% if auth_user %}
+    <span class="topbar-user-name">{{ auth_user }}</span>
+    <a class="btn btn-ghost nav-button" href="/logout">退出</a>
+    {% endif %}
+  </div>
+</header>
+
+<main class="claim-layout">
+  <section class="claim-panel">
+    <div class="col-head">
+      <h1>领取确认</h1>
+      <span class="badge">本地发货 · 无支付</span>
+    </div>
+
+    <div id="claimStats" class="claim-stats" aria-live="polite">
+      <div class="claim-stat"><span>号池总数</span><b data-claim-stat="total">--</b></div>
+      <div class="claim-stat"><span>可领</span><b data-claim-stat="available">--</b></div>
+      <div class="claim-stat"><span>已领</span><b data-claim-stat="claimed">--</b></div>
+      <div class="claim-stat"><span>订单</span><b data-claim-stat="orders">--</b></div>
+    </div>
+
+    <form id="claimForm" class="claim-form">
+      <div class="claim-product">
+        <div>
+          <strong>iCloud 隐私邮箱</strong>
+          <p>用于注册等自用场景。领走即占用，自行保管，本系统不再追踪用途。</p>
+        </div>
+        <span class="badge badge-ok">自动发货</span>
+      </div>
+
+      <label class="field-stack">
+        <span class="field-label">领取数量 <em>*</em></span>
+        <div class="claim-qty">
+          <button type="button" id="qtyMinus" class="btn">−</button>
+          <input id="claimCount" type="number" min="1" max="500" value="1" required>
+          <button type="button" id="qtyPlus" class="btn">+</button>
+        </div>
+        <span class="field-hint">单次 1–500；可领库存不足时会拒绝。</span>
+      </label>
+
+      <label class="field-stack">
+        <span class="field-label">常用邮箱 <em>*</em></span>
+        <input id="claimEmail" type="email" placeholder="领取列表会发到这个邮箱" required autocomplete="email">
+        <span class="field-hint">建议填你自己的常用邮箱，列表会 SMTP 发过去。</span>
+      </label>
+
+      <label class="field-stack">
+        <span class="field-label">备注</span>
+        <input id="claimNote" type="text" maxlength="200" placeholder="例如：OpenAI 注册 / 测试用 / 给谁用">
+        <span class="field-hint">代替安全密码；只记在本地订单里。</span>
+      </label>
+
+      <label class="field-stack">
+        <span class="field-label">母号范围（可选）</span>
+        <select id="claimAccount">
+          <option value="">全部可领邮箱</option>
+        </select>
+      </label>
+
+      <label class="claim-check">
+        <input id="claimSendEmail" type="checkbox" checked>
+        <span>领取后发送到常用邮箱</span>
+      </label>
+
+      <label class="claim-check">
+        <input id="claimConfirm" type="checkbox" required>
+        <span>我确认数量无误；领走后自行负责这些邮箱</span>
+      </label>
+
+      <button class="btn btn-primary claim-submit" type="submit" id="claimSubmit">确认领取</button>
+      <p id="claimFormMsg" class="claim-form-msg"></p>
+    </form>
+  </section>
+
+  <section class="claim-panel claim-result-panel">
+    <div class="col-head">
+      <h2>最近订单</h2>
+      <button class="btn btn-ghost" type="button" id="claimRefresh">刷新</button>
+    </div>
+    <div id="claimOrders" class="claim-orders"></div>
+  </section>
+</main>
+
+<div id="claimToast" class="toast hidden"></div>
+<script src="/static/claims.js?v=20260908-2"></script>
+</body>
+</html>

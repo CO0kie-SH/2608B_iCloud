@@ -6,9 +6,28 @@
 
 | 项 | 值 |
 |----|-----|
-| **版本** | **26.9.6A** |
+| **版本** | **26.9.9A** |
 | **Python** | `D:\0Code2\py312\python.exe`（或本机 Python 3.11+） |
-| **最后更新** | 2026-09-06 |
+| **最后更新** | 2026-09-09 |
+| **仓库** | https://github.com/CO0kie-SH/2608B_iCloud |
+
+---
+
+## 版本 26.9.9A 变更摘要
+
+工作台增加账号密码登录，便于部署到服务器后限制管理入口。领取取码接口仍走 token，不受登录墙影响。
+
+| 模块 | 变更 |
+|------|------|
+| Web 登录 | 默认开启会话鉴权；固定用户名 `lws`、`mhw`；密码只写在服务器 `.env` |
+| 会话 | Cookie `icloud_web_session`，HttpOnly，SameSite=Lax；HTTPS 时设 `AUTH_COOKIE_SECURE=true` |
+| 登录墙 | 未登录访问页面 302 到 `/login`；`/api/*` 返回 `401 unauthorized` |
+| 白名单 | `GET /api/health` 探活、`GET /api/v1/code` 注册机取码、`/static/`、`/login`、`/logout` 无需工作台登录 |
+| 界面 | 登录页；各工作台顶栏显示当前用户并提供退出 |
+| 限流 | 同 IP 登录失败约 8 次 / 15 分钟后暂时拒绝 |
+| 测试 | `tests/test_web_auth.py` 覆盖未登录拦截、公开接口、双账号登录、开放重定向、登出和 `AUTH_DISABLED` |
+
+**升级注意：** 升级前备份 `db/aliases.db`。在服务器 `.env` 填写 `AUTH_SESSION_SECRET`、`AUTH_PASSWORD_LWS`、`AUTH_PASSWORD_MHW`，模板见 `.env.example`。生产不要开启 `AUTH_DISABLED`。反代 HTTPS 时打开 `AUTH_COOKIE_SECURE`。默认端口仍为 `8770`。
 
 ---
 
@@ -169,6 +188,7 @@ python main.py quota -a user001@icloud.com
 | 套餐 | HTTP 403 后核验免费 5 GB；自动移出生产池，支持 CLI 复查及解除套餐限制 |
 | 多客户端 | 打开即同步；生产历史、配额和邮件状态以服务器 SQLite 为准 |
 | Cookie 采集 | Camoufox **有头**登录 iCloud → 写回 `apple.cookie`（2FA 在浏览器完成） |
+| Web 登录 | 工作台账号密码会话；部署后默认强制登录；取码接口仍走 token |
 | CLI | `main.py` 子命令；`generate_alias.bat`；`start_web.bat`；`cookie_login.bat`；`produce.bat` / `produce.sh` |
 
 ---
@@ -182,6 +202,9 @@ python main.py quota -a user001@icloud.com
 ├── start_web.bat
 ├── cookie_login.bat                # 登录 / 无头采集 / debug / 会话复用
 ├── produce.bat / produce.sh        # 独立 curl 生产客户端（不参与风控）
+├── pack.py / push.py / upgrade.py  # 打包、推送、离线升级
+├── VERSION
+├── CLAUDE.md
 ├── requirements.txt
 ├── .env / .env.example          # 本地密钥，勿提交
 ├── proxy.yaml                   # 代理与项目变量（可选）
@@ -200,6 +223,7 @@ python main.py quota -a user001@icloud.com
 ├── web/
 │   ├── __init__.py
 │   ├── app.py                  # FastAPI 应用
+│   ├── auth.py                 # 工作台登录与会话
 │   ├── jobs.py                 # 收信/生产后台任务
 │   ├── production_loop.py      # 持久化单线程轮询控制器
 │   ├── production_service.py   # 单次/轮询共用的生产提交入口
@@ -233,7 +257,81 @@ python main.py quota -a user001@icloud.com
 D:\0Code2\py312\python.exe -m pip install -r requirements.txt
 ```
 
-依赖：`python-dotenv`、`requests`、`PyYAML`、`camoufox[geoip]`、`FastAPI`、`Uvicorn`、`Jinja2`、`Pydantic`。
+依赖：`python-dotenv`、`requests`、`PyYAML`、`camoufox[geoip]`、`patchright`、`FastAPI`、`Uvicorn`、`Jinja2`、`Pydantic`。
+
+### Patchright 与 DuckDuckGo 扩展测试
+
+Patchright 使用项目内 Chromium，资源位于 `browsers/patchright`。DuckDuckGo Chrome
+扩展的固定加载目录为 `browsers/extensions/duckduckgo/active`，版本和官方 SHA-256
+记录在 `third_party/duckduckgo-extension.json`；浏览器资料使用独立的
+`db/browser_profiles/patchright-duckduckgo`，不会与 iCloud Cookie 会话混用。
+
+浏览器页面代理填写根目录 `.env` 的 `PATCHRIGHT_PROXY`，例如
+`PATCHRIGHT_PROXY=socks5://127.0.0.1:10808`；也支持 `http://`、`https://`，留空、
+`none` 或 `direct` 表示直连。`proxy.yaml` 的 `proxy.patchright_proxy` 非空时优先于
+`.env`。命令行 `--proxy` 只覆盖本次启动。
+
+```powershell
+# 安装/检查 Patchright Chromium
+D:\0Code2\py312\python.exe scripts\patchright_browser.py install
+
+# 不加载扩展打开 mayips
+D:\0Code2\py312\python.exe scripts\patchright_browser.py open https://mayips.com/
+
+# 加载 DuckDuckGo 扩展并打开 mayips；输出会校验 Manifest V3 Service Worker
+D:\0Code2\py312\python.exe scripts\patchright_browser.py open https://mayips.com/ `
+  --extension-dir browsers\extensions\duckduckgo\active `
+  --profile-dir db\browser_profiles\patchright-duckduckgo
+```
+
+也可以直接双击：
+
+- `bat/test_patchright.bat`：无扩展测试。
+- `bat/test_patchright_duckduckgo.bat`：加载 DuckDuckGo 扩展的 mayips 测试。
+- `bat/update_duckduckgo_extension.bat`：查询最新稳定版，确认后下载、校验并更新扩展。
+
+更新器只接受 GitHub 官方 Chrome 发布包，下载完成后先校验 SHA-256、Manifest、
+Service Worker 和最低 Chromium 版本，再原子切换 `active`。浏览器运行期间会持有
+扩展锁；更新前请先关闭 `test_patchright_duckduckgo.bat` 打开的窗口。更新失败会保留
+当前版本，上一版本保存在 `browsers/extensions/duckduckgo/previous`。
+
+#### Duck 专用浏览器入口
+
+`duck/duck_browser.py` 是面向 DuckDuckGo 扩展的独立启动器，默认使用独立资料目录
+`db/browser_profiles/duckduckgo`，不会混用 iCloud Cookie 会话：
+
+完整用法、Email Protection 操作步骤和 GitHub 参考见 [duck/README.md](duck/README.md)。
+
+```powershell
+# 打开 DuckDuckGo 首页，并加载扩展（关闭浏览器窗口结束进程）
+D:\0Code2\py312\python.exe -m duck.duck_browser
+
+# 打开指定页面
+D:\0Code2\py312\python.exe -m duck.duck_browser https://mayips.com/
+
+# 同时打开扩展弹窗或设置页
+D:\0Code2\py312\python.exe -m duck.duck_browser --popup
+D:\0Code2\py312\python.exe -m duck.duck_browser --options
+
+# 不加载扩展做网络/页面对照，并在加载后自动退出
+D:\0Code2\py312\python.exe -m duck.duck_browser https://mayips.com/ --no-extension --headless --check
+```
+
+浏览器内使用时，点击工具栏中的 DuckDuckGo 图标可查看当前站点的保护状态；弹窗中的
+`Report Broken Site` 用于匿名反馈受影响站点。扩展设置页可调整隐私保护和反馈选项。
+扩展自身负责跟踪器拦截、HTTPS 升级、Cookie 弹窗处理和 Autofill；代理仍由 Patchright
+的 `PATCHRIGHT_PROXY`、`proxy.yaml` 或 `--proxy` 参数负责。
+
+官方使用和开发示例：
+
+- [DuckDuckGo Privacy Extensions](https://github.com/duckduckgo/duckduckgo-privacy-extension)
+- [官方 Web Tracking Protections 说明](https://help.duckduckgo.com/duckduckgo-help-pages/privacy/web-tracking-protections/)
+- 官方集成测试使用 Playwright 持久化上下文加载完整扩展，测试页面位于仓库的 `integration-test` 目录，并通过 Service Worker 等待扩展完成初始化。
+- 本地开发构建命令为 `npm run dev-chrome`；发布构建命令为 `npm run release-chrome`。
+- 社区项目 [Lanshuns/Qwacky](https://github.com/Lanshuns/Qwacky) 采用独立扩展方式调用 DuckDuckGo Email Protection，提供别名生成、Autofill、账户切换和本地数据管理，可作为“只使用邮件保护能力”的参考。
+
+扩展可能改变页面请求、Cookie 或脚本执行。排查 `403` 或页面资源异常时，先分别运行
+带扩展和 `--no-extension` 两组测试，再比较输出的 HTTP 状态、页面加载结果和网络日志。
 
 ### Camoufox（项目内二进制）
 
@@ -472,6 +570,24 @@ python main.py cookie-login -a user003@icloud.com
 
 ## 启动 WebUI
 
+### Web 登录
+
+工作台默认开启账号密码鉴权，部署到服务器时不要关闭。
+
+| 项 | 说明 |
+|----|------|
+| 用户名 | 固定两个：`lws`、`mhw` |
+| 密码 | 只写在服务器本地 `.env` 的 `AUTH_PASSWORD_LWS` / `AUTH_PASSWORD_MHW`，不要提交到 git |
+| 会话 | `AUTH_SESSION_SECRET` 必填；cookie 名 `icloud_web_session`，HttpOnly，SameSite=Lax |
+| HTTPS | 反代 HTTPS 时设 `AUTH_COOKIE_SECURE=true` |
+| 反代 | 需要按 `X-Forwarded-For` 限流时再设 `AUTH_TRUST_PROXY=true`；默认不信该头 |
+| 探活 | `GET /api/health` 无需登录 |
+| 注册机取码 | `GET /api/v1/code?token=...` 仍走领取 token，不走工作台登录墙 |
+| API 文档 | `/api/docs` 需要先登录 |
+| 本地逃生 | 仅测试可设 `AUTH_DISABLED=true`；生产环境不要开 |
+
+登录页：`/login`。顶栏显示当前用户并可退出。
+
 ### HTTP 403 与免费套餐处理
 
 生产遇到 HTTP 403 后，会通过容量和套餐来源接口核验当前套餐。确认是免费 5 GB 时，
@@ -506,12 +622,32 @@ start_web.bat 8771
 
 | 页面 | 地址 | 用途 |
 |------|------|------|
-| 首页 | `http://127.0.0.1:8770/` | 本地工作台入口；预留后续账号登录系统 |
+| 登录 | `http://127.0.0.1:8770/login` | 工作台账号密码登录（默认开启） |
+| 首页 | `http://127.0.0.1:8770/` | 本地工作台入口（需登录） |
 | 邮箱池 | `http://127.0.0.1:8770/mailbox` | 账户、隐私邮箱、分类邮件与正文详情 |
 | mail.com 收件 | `http://127.0.0.1:8770/mailcom` | mail.com 多账号、分类邮件、验证码与正文详情 |
 | 生产 | `http://127.0.0.1:8770/production` | 按 iCloud 账户生产 HME、查看配额和任务 |
 | 轮询生产 | `http://127.0.0.1:8770/production-loop` | 勾选账号后顺序循环生产，支持无限或定时运行 |
-| API 文档 | `http://127.0.0.1:8770/api/docs` | OpenAPI 交互文档 |
+| API 文档 | `http://127.0.0.1:8770/api/docs` | OpenAPI 交互文档（需登录） |
+
+### 打包与发布
+
+```powershell
+python pack.py --check
+python pack.py -m "Release 26.9.9A web login"
+python push.py --check
+python push.py
+python upgrade.py --check
+```
+
+| 脚本 | 作用 |
+|------|------|
+| `pack.py` | 提交发布文件、打回退 tag、生成 `release/` zip（含 `RELEASE.json`） |
+| `push.py` | 推送当前分支和 tags 到 `CO0kie-SH/2608B_iCloud` |
+| `upgrade.py` | 优先用本地 zip 升级；没有包时再询问是否从 GitHub 拉取 |
+
+zip 不含 `.env`、真实账户 YAML、Cookie、SQLite、浏览器二进制和日志。服务器升级后仍使用本机 `.env` 与 `db/aliases.db`。
+
 
 生产页参数：
 

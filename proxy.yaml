@@ -14,6 +14,8 @@ proxy:
   hme_proxy: ""
   # Camoufox 浏览器与下载代理。
   camoufox_proxy: ""
+  # Patchright Chromium 页面代理；留空时回退 .env 的 PATCHRIGHT_PROXY。
+  patchright_proxy: ""
   # mail.com 收件代理。
   mailcom_proxy: ""
   # 可选全局兜底代理，HME_PROXY 留空时按 HTTPS/HTTP/ALL 使用。

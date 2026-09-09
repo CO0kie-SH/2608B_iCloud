@@ -27,11 +27,16 @@
 
   <div class="topbar-actions">
     <a class="btn btn-ghost nav-button" href="/">首页</a>
+    <a class="btn btn-ghost nav-button" href="/claims">领取邮箱</a>
     <a class="btn btn-ghost nav-button" href="/production">生产</a>
     <a class="btn btn-ghost nav-button" href="/production-loop">轮询生产</a>
     <button id="btnSyncAliases" class="btn btn-ghost" title="从 iCloud 拉取隐私邮箱列表">同步隐私</button>
     <button id="btnSyncMails" class="btn btn-primary" title="从 IMAP 增量收取邮件">收取邮件</button>
     <button id="btnSettings" class="btn btn-ghost" type="button" aria-expanded="false" title="界面设置">设置</button>
+    {% if auth_user %}
+    <span class="topbar-user-name">{{ auth_user }}</span>
+    <a class="btn btn-ghost nav-button" href="/logout">退出</a>
+    {% endif %}
   </div>
 </header>
 

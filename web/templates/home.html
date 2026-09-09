@@ -10,7 +10,13 @@
 <body>
 <header class="topbar">
   <div class="brand"><span class="logo">⌂</span><div><div class="brand-name">{{ app_name }}</div><div class="brand-sub">本地工作台</div></div></div>
-  <nav class="page-nav"><a class="active" href="/">首页</a><a href="/mailbox">邮箱池子</a><a href="/mailcom">mail.com</a><a href="/production">生产</a><a href="/production-loop">轮询生产</a></nav>
+  <nav class="page-nav"><a class="active" href="/">首页</a><a href="/mailbox">邮箱池子</a><a href="/mailcom">mail.com</a><a href="/claims">领取邮箱</a><a href="/production">生产</a><a href="/production-loop">轮询生产</a></nav>
+  <div class="topbar-user">
+    {% if auth_user %}
+    <span class="topbar-user-name">{{ auth_user }}</span>
+    <a class="btn btn-ghost nav-button" href="/logout">退出</a>
+    {% endif %}
+  </div>
 </header>
 
 <main class="home-page">
@@ -43,10 +49,22 @@
 
     <section class="home-notice" aria-labelledby="accountAccessTitle">
       <div>
-        <h2 id="accountAccessTitle">账号登录系统</h2>
-        <span class="badge badge-soon">后续接入</span>
+        <h2 id="accountAccessTitle">账号登录</h2>
+        {% if auth_user %}
+        <span class="badge badge-ok">已登录</span>
+        {% elif auth_disabled %}
+        <span class="badge">鉴权关闭</span>
+        {% else %}
+        <span class="badge">未登录</span>
+        {% endif %}
       </div>
-      <p>当前使用本地工作台，后续将在主页接入账号登录与会话管理。</p>
+      {% if auth_user %}
+      <p>当前用户 <strong>{{ auth_user }}</strong>。<a href="/logout">退出登录</a></p>
+      {% elif auth_disabled %}
+      <p>当前 <code>AUTH_DISABLED</code> 已开启，工作台未强制登录（仅本地/测试）。</p>
+      {% else %}
+      <p>尚未登录。<a href="/login">前往登录</a></p>
+      {% endif %}
     </section>
 
     <section class="home-workspace" aria-labelledby="workspaceTitle">
@@ -57,6 +75,7 @@
       <div class="home-link-list">
         <a href="/mailbox"><span><b>邮箱池子</b><small>账户、隐私邮箱与分类邮件</small></span><strong>进入</strong></a>
         <a href="/mailcom"><span><b>mail.com 收件</b><small>mail.com 多账号、验证码与正文详情</small></span><strong>进入</strong></a>
+        <a href="/claims"><span><b>领取邮箱</b><small>确认数量、备注，发到常用邮箱</small></span><strong>进入</strong></a>
         <a href="/production"><span><b>生产</b><small>按单个 iCloud 账号提交生产任务</small></span><strong>进入</strong></a>
         <a href="/production-loop"><span><b>轮询生产</b><small>按勾选账号顺序持续生产</small></span><strong>进入</strong></a>
       </div>

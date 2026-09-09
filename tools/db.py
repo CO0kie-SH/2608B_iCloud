@@ -665,6 +665,80 @@ class AliasDB:
                 "CREATE INDEX IF NOT EXISTS idx_alias_group_members_hme "
                 "ON alias_group_members(hme)"
             )
+
+            # ---------- 本地领取订单（无真实交易；领走即占用）----------
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS claim_orders (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_no TEXT NOT NULL UNIQUE,
+                    contact_email TEXT NOT NULL DEFAULT '',
+                    note TEXT NOT NULL DEFAULT '',
+                    count INTEGER NOT NULL DEFAULT 0,
+                    status TEXT NOT NULL DEFAULT 'claimed',
+                    deliver_status TEXT NOT NULL DEFAULT 'pending',
+                    deliver_error TEXT NOT NULL DEFAULT '',
+                    deliver_from TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claim_orders_created "
+                "ON claim_orders(created_at DESC)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claim_orders_contact "
+                "ON claim_orders(contact_email)"
+            )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS claim_order_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    order_id INTEGER NOT NULL,
+                    order_no TEXT NOT NULL,
+                    hme TEXT NOT NULL UNIQUE,
+                    account TEXT NOT NULL DEFAULT '',
+                    parent_mail TEXT NOT NULL DEFAULT '',
+                    label TEXT NOT NULL DEFAULT '',
+                    cdk TEXT NOT NULL DEFAULT '',
+                    access_token TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(order_id) REFERENCES claim_orders(id)
+                )
+                """
+            )
+            item_cols = self._table_columns(conn, "claim_order_items")
+            if "access_token" not in item_cols:
+                conn.execute(
+                    "ALTER TABLE claim_order_items ADD COLUMN access_token TEXT NOT NULL DEFAULT ''"
+                )
+            # 旧订单补发独立 token，方便导出 邮箱----取码地址
+            missing_token_rows = conn.execute(
+                """
+                SELECT id FROM claim_order_items
+                WHERE access_token IS NULL OR trim(access_token) = ''
+                """
+            ).fetchall()
+            for row in missing_token_rows:
+                conn.execute(
+                    "UPDATE claim_order_items SET access_token = ? WHERE id = ?",
+                    (uuid.uuid4().hex, row["id"]),
+                )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claim_order_items_order "
+                "ON claim_order_items(order_id)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_claim_order_items_hme "
+                "ON claim_order_items(hme)"
+            )
+            conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_claim_order_items_token "
+                "ON claim_order_items(access_token) "
+                "WHERE access_token IS NOT NULL AND access_token != ''"
+            )
             conn.commit()
 
     def upsert_alias(
@@ -1357,20 +1431,31 @@ class AliasDB:
         return [self._row_to_record(r) for r in rows]
 
     def get_alias_pool_stats(self) -> dict[str, int]:
-        """返回首页号池概览，CDK_ 按标签前缀区分。"""
+        """返回首页号池概览；可用数排除已领取邮箱。"""
         with self._connect() as conn:
             row = conn.execute(
                 """
                 SELECT
                     COUNT(*) AS total,
-                    COALESCE(SUM(CASE WHEN is_active != 0 THEN 1 ELSE 0 END), 0) AS available,
+                    COALESCE(SUM(CASE
+                        WHEN is_active != 0
+                         AND NOT EXISTS (
+                             SELECT 1 FROM claim_order_items c
+                             WHERE lower(c.hme) = lower(aliases.hme)
+                         )
+                        THEN 1 ELSE 0 END), 0) AS available,
                     COALESCE(SUM(CASE
                         WHEN substr(upper(trim(COALESCE(label, ''))), 1, 4) = 'CDK_'
                         THEN 1 ELSE 0 END), 0) AS cdk_total,
                     COALESCE(SUM(CASE
                         WHEN is_active != 0
                          AND substr(upper(trim(COALESCE(label, ''))), 1, 4) = 'CDK_'
-                        THEN 1 ELSE 0 END), 0) AS cdk_available
+                         AND NOT EXISTS (
+                             SELECT 1 FROM claim_order_items c
+                             WHERE lower(c.hme) = lower(aliases.hme)
+                         )
+                        THEN 1 ELSE 0 END), 0) AS cdk_available,
+                    COALESCE((SELECT COUNT(*) FROM claim_order_items), 0) AS claimed
                 FROM aliases
                 """
             ).fetchone()
@@ -1379,7 +1464,287 @@ class AliasDB:
             "available": int(row["available"] or 0),
             "cdk_total": int(row["cdk_total"] or 0),
             "cdk_available": int(row["cdk_available"] or 0),
+            "claimed": int(row["claimed"] or 0),
         }
+
+    def get_claim_stats(self) -> dict[str, int]:
+        """领取页库存：总数 / 可领 / 已领 / 订单数。"""
+        pool = self.get_alias_pool_stats()
+        with self._connect() as conn:
+            orders = int(
+                conn.execute("SELECT COUNT(*) AS n FROM claim_orders").fetchone()["n"] or 0
+            )
+        return {
+            "total": int(pool.get("total") or 0),
+            "available": int(pool.get("available") or 0),
+            "claimed": int(pool.get("claimed") or 0),
+            "orders": orders,
+        }
+
+    def _new_claim_order_no(self, conn: sqlite3.Connection) -> str:
+        for _ in range(12):
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+            order_no = f"CLM{stamp}{uuid.uuid4().hex[:6].upper()}"
+            exists = conn.execute(
+                "SELECT 1 FROM claim_orders WHERE order_no = ? LIMIT 1",
+                (order_no,),
+            ).fetchone()
+            if not exists:
+                return order_no
+        return f"CLM{uuid.uuid4().hex.upper()}"
+
+    def _claim_order_dict(
+        self,
+        order_row: sqlite3.Row | dict[str, Any],
+        item_rows: list[sqlite3.Row] | None = None,
+    ) -> dict[str, Any]:
+        if isinstance(order_row, sqlite3.Row):
+            order = dict(order_row)
+        else:
+            order = dict(order_row)
+        items: list[dict[str, Any]] = []
+        for row in item_rows or []:
+            item = dict(row)
+            items.append(
+                {
+                    "hme": item.get("hme") or "",
+                    "account": item.get("account") or "",
+                    "parent_mail": item.get("parent_mail") or "",
+                    "label": item.get("label") or "",
+                    "cdk": item.get("cdk") or "",
+                    "access_token": item.get("access_token") or "",
+                }
+            )
+        return {
+            "id": int(order.get("id") or 0),
+            "order_no": order.get("order_no") or "",
+            "contact_email": order.get("contact_email") or "",
+            "note": order.get("note") or "",
+            "count": int(order.get("count") or 0),
+            "status": order.get("status") or "claimed",
+            "deliver_status": order.get("deliver_status") or "pending",
+            "deliver_error": order.get("deliver_error") or "",
+            "deliver_from": order.get("deliver_from") or "",
+            "created_at": order.get("created_at") or "",
+            "updated_at": order.get("updated_at") or "",
+            "items": items,
+            "emails": [it["hme"] for it in items if it.get("hme")],
+        }
+
+    def claim_aliases(
+        self,
+        *,
+        count: int,
+        contact_email: str,
+        note: str = "",
+        account: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        原子领取 count 个未占用且仍启用的隐私邮箱。
+        领走即占用，不支持自动退回；调用方负责发到常用邮箱。
+        """
+        want = int(count or 0)
+        if want < 1:
+            raise ValueError("领取数量至少为 1")
+        if want > 500:
+            raise ValueError("单次最多领取 500 个")
+        contact = (contact_email or "").strip()
+        if not contact or "@" not in contact:
+            raise ValueError("请填写有效的常用邮箱")
+        note_text = (note or "").strip()
+        if len(note_text) > 200:
+            raise ValueError("备注最多 200 字")
+        account_filter = (account or "").strip() or None
+        now = utc_now()
+
+        with self._connect() as conn:
+            params: list[Any] = []
+            sql = """
+                SELECT a.id, a.hme, a.account, a.parent_mail, a.label, a.cdk
+                FROM aliases a
+                WHERE a.is_active != 0
+                  AND NOT EXISTS (
+                      SELECT 1 FROM claim_order_items c
+                      WHERE lower(c.hme) = lower(a.hme)
+                  )
+            """
+            if account_filter:
+                sql += " AND (a.account = ? OR a.parent_mail = ?)"
+                params.extend([account_filter, account_filter])
+            sql += " ORDER BY a.id ASC LIMIT ?"
+            params.append(want)
+            rows = conn.execute(sql, params).fetchall()
+            if len(rows) < want:
+                free = int(
+                    conn.execute(
+                        """
+                        SELECT COUNT(*) AS n
+                        FROM aliases a
+                        WHERE a.is_active != 0
+                          AND NOT EXISTS (
+                              SELECT 1 FROM claim_order_items c
+                              WHERE lower(c.hme) = lower(a.hme)
+                          )
+                        """
+                    ).fetchone()["n"]
+                    or 0
+                )
+                raise ValueError(f"可领邮箱不足：需要 {want} 个，当前仅剩 {free} 个")
+
+            order_no = self._new_claim_order_no(conn)
+            cur = conn.execute(
+                """
+                INSERT INTO claim_orders (
+                    order_no, contact_email, note, count, status,
+                    deliver_status, deliver_error, deliver_from,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, 'claimed', 'pending', '', '', ?, ?)
+                """,
+                (order_no, contact, note_text, want, now, now),
+            )
+            order_id = int(cur.lastrowid)
+            for row in rows:
+                token = uuid.uuid4().hex
+                conn.execute(
+                    """
+                    INSERT INTO claim_order_items (
+                        order_id, order_no, hme, account, parent_mail,
+                        label, cdk, access_token, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        order_id,
+                        order_no,
+                        row["hme"],
+                        row["account"] or "",
+                        row["parent_mail"] or row["account"] or "",
+                        row["label"] or "",
+                        row["cdk"] or "",
+                        token,
+                        now,
+                    ),
+                )
+            order_row = conn.execute(
+                "SELECT * FROM claim_orders WHERE id = ?",
+                (order_id,),
+            ).fetchone()
+            item_rows = conn.execute(
+                "SELECT * FROM claim_order_items WHERE order_id = ? ORDER BY id ASC",
+                (order_id,),
+            ).fetchall()
+            conn.commit()
+        return self._claim_order_dict(order_row, item_rows)
+
+    def update_claim_delivery(
+        self,
+        order_no: str,
+        *,
+        deliver_status: str,
+        deliver_error: str = "",
+        deliver_from: str = "",
+    ) -> dict[str, Any] | None:
+        now = utc_now()
+        with self._connect() as conn:
+            cur = conn.execute(
+                """
+                UPDATE claim_orders
+                SET deliver_status = ?,
+                    deliver_error = ?,
+                    deliver_from = ?,
+                    updated_at = ?
+                WHERE order_no = ?
+                """,
+                (
+                    (deliver_status or "").strip() or "pending",
+                    (deliver_error or "").strip(),
+                    (deliver_from or "").strip(),
+                    now,
+                    (order_no or "").strip(),
+                ),
+            )
+            if cur.rowcount <= 0:
+                return None
+            conn.commit()
+        return self.get_claim_order(order_no)
+
+    def get_claim_order(self, order_no: str) -> dict[str, Any] | None:
+        key = (order_no or "").strip()
+        if not key:
+            return None
+        with self._connect() as conn:
+            order_row = conn.execute(
+                "SELECT * FROM claim_orders WHERE order_no = ? LIMIT 1",
+                (key,),
+            ).fetchone()
+            if not order_row:
+                return None
+            item_rows = conn.execute(
+                "SELECT * FROM claim_order_items WHERE order_id = ? ORDER BY id ASC",
+                (order_row["id"],),
+            ).fetchall()
+        return self._claim_order_dict(order_row, item_rows)
+
+    def list_claim_orders(self, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
+        lim = max(1, min(int(limit or 50), 200))
+        off = max(0, int(offset or 0))
+        with self._connect() as conn:
+            order_rows = conn.execute(
+                """
+                SELECT * FROM claim_orders
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                (lim, off),
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for order_row in order_rows:
+                item_rows = conn.execute(
+                    "SELECT * FROM claim_order_items WHERE order_id = ? ORDER BY id ASC",
+                    (order_row["id"],),
+                ).fetchall()
+                result.append(self._claim_order_dict(order_row, item_rows))
+        return result
+
+    def get_claim_item_by_token(self, token: str) -> dict[str, Any] | None:
+        key = (token or "").strip()
+        if not key:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT i.*, o.contact_email, o.note AS order_note, o.created_at AS order_created_at
+                FROM claim_order_items i
+                JOIN claim_orders o ON o.id = i.order_id
+                WHERE i.access_token = ?
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        return {
+            "hme": data.get("hme") or "",
+            "account": data.get("account") or "",
+            "parent_mail": data.get("parent_mail") or "",
+            "label": data.get("label") or "",
+            "cdk": data.get("cdk") or "",
+            "access_token": data.get("access_token") or "",
+            "order_no": data.get("order_no") or "",
+            "contact_email": data.get("contact_email") or "",
+            "order_note": data.get("order_note") or "",
+            "created_at": data.get("created_at") or "",
+            "order_created_at": data.get("order_created_at") or "",
+        }
+
+    def get_claim_item_by_email_token(self, email: str, token: str) -> dict[str, Any] | None:
+        item = self.get_claim_item_by_token(token)
+        if not item:
+            return None
+        want = (email or "").strip().lower()
+        if want and want != str(item.get("hme") or "").strip().lower():
+            return None
+        return item
 
     # ---------- CDK 查询 API ----------
 

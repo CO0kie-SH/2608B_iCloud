@@ -1,0 +1,9 @@
+{
+  "repository": "https://github.com/duckduckgo/duckduckgo-privacy-extension",
+  "version": "2026.8.24",
+  "release_url": "https://github.com/duckduckgo/duckduckgo-privacy-extension/releases/tag/2026.8.24",
+  "asset_url": "https://github.com/duckduckgo/duckduckgo-privacy-extension/releases/download/2026.8.24/chrome-release-20260824_091043.zip",
+  "sha256": "5c0873b9904f69405dca1362573b96c9306c619d8014cdaaea4a04a73a1ff3c2",
+  "license": "Apache-2.0",
+  "license_url": "https://raw.githubusercontent.com/duckduckgo/duckduckgo-privacy-extension/2026.8.24/LICENSE.md"
+}

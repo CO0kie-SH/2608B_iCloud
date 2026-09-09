@@ -146,6 +146,7 @@ class HomePoolStatsOut(BaseModel):
     available: int
     cdk_total: int
     cdk_available: int
+    claimed: int = 0
 
 
 class MailDetailOut(BaseModel):
@@ -245,6 +246,81 @@ def alias_to_out(
         mail_count=int(stats.get("count") or 0),
         last_mail_at=str(stats.get("last_mail_at") or ""),
         groups=(groups_map or {}).get(rec.hme, []),
+    )
+
+
+class ClaimStatsOut(BaseModel):
+    total: int
+    available: int
+    claimed: int
+    orders: int
+
+
+class ClaimItemOut(BaseModel):
+    hme: str
+    account: str = ""
+    parent_mail: str = ""
+    label: str = ""
+    cdk: str = ""
+    access_token: str = ""
+    code_url: str = ""
+    export_line: str = ""
+
+
+class ClaimOrderOut(BaseModel):
+    id: int
+    order_no: str
+    contact_email: str
+    note: str = ""
+    count: int
+    status: str = "claimed"
+    deliver_status: str = "pending"
+    deliver_error: str = ""
+    deliver_from: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+    emails: list[str] = []
+    export_lines: list[str] = []
+    items: list[ClaimItemOut] = []
+
+
+def claim_order_to_out(row: dict[str, Any]) -> ClaimOrderOut:
+    items = [
+        ClaimItemOut(
+            hme=str(it.get("hme") or ""),
+            account=str(it.get("account") or ""),
+            parent_mail=str(it.get("parent_mail") or ""),
+            label=str(it.get("label") or ""),
+            cdk=str(it.get("cdk") or ""),
+            access_token=str(it.get("access_token") or ""),
+            code_url=str(it.get("code_url") or ""),
+            export_line=str(it.get("export_line") or ""),
+        )
+        for it in (row.get("items") or [])
+    ]
+    emails = [str(x) for x in (row.get("emails") or []) if str(x).strip()]
+    if not emails:
+        emails = [it.hme for it in items if it.hme]
+    export_lines = [str(x) for x in (row.get("export_lines") or []) if str(x).strip()]
+    if not export_lines:
+        export_lines = [it.export_line for it in items if it.export_line]
+    if not export_lines:
+        export_lines = list(emails)
+    return ClaimOrderOut(
+        id=int(row.get("id") or 0),
+        order_no=str(row.get("order_no") or ""),
+        contact_email=str(row.get("contact_email") or ""),
+        note=str(row.get("note") or ""),
+        count=int(row.get("count") or 0),
+        status=str(row.get("status") or "claimed"),
+        deliver_status=str(row.get("deliver_status") or "pending"),
+        deliver_error=str(row.get("deliver_error") or ""),
+        deliver_from=str(row.get("deliver_from") or ""),
+        created_at=str(row.get("created_at") or ""),
+        updated_at=str(row.get("updated_at") or ""),
+        emails=emails,
+        export_lines=export_lines,
+        items=items,
     )
 
 
