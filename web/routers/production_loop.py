@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from web.deps import get_accounts, get_db, get_settings
+from web.deps import get_accounts, get_db, get_settings, resolve_account
 from web.production_loop import get_production_loop_controller
 from web.production_service import production_options_data
 from web.schemas import ProductionLoopConfigIn
@@ -44,4 +44,12 @@ def start_loop() -> dict[str, Any]:
 @router.post("/stop")
 def stop_loop() -> dict[str, Any]:
     get_production_loop_controller().stop()
+    return _snapshot()
+
+
+@router.post("/accounts/{account}/unlock")
+def unlock_account(account: str) -> dict[str, Any]:
+    """清除免费 5 GB 标记，恢复该账号的生产勾选能力。"""
+    resolved = resolve_account(account)
+    get_db().clear_account_free_plan(resolved.name)
     return _snapshot()

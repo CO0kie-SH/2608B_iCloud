@@ -202,6 +202,14 @@ class ICloudPlanProductionTests(unittest.TestCase):
         self.db.assert_production_ready(self.account.name)
         self.assertEqual(self.db.get_production_loop_state()["selected_accounts"], [])
 
+    def test_manual_free_plan_unlock_clears_flag_without_auto_selection(self) -> None:
+        self.db.save_account_plan(self.account.name, self.free)
+        self.db.update_production_loop_state(selected_accounts=[self.account.name])
+        flag = self.db.clear_account_free_plan(self.account.name)
+        self.assertFalse(flag["free_plan"])
+        self.db.assert_production_ready(self.account.name)
+        self.assertEqual(self.db.get_production_loop_state()["selected_accounts"], [])
+
     def test_pool_options_and_submission_block_free_plan_before_network(self) -> None:
         self.db.save_account_plan(self.account.name, self.free)
         item = production_options_data([self.account], settings=self.settings, db=self.db)["accounts"][0]

@@ -146,6 +146,9 @@ function renderAccounts(snapshot) {
     const ready = account.hme_ok && !account.cookie_invalid && !limitReached;
     const status = account.free_plan ? "免费 5 GB，已移出" : limitReached ? `已达 ${aliasLimit} 上限` : ready ? "可用" : "Cookie 无效";
     const statusClass = ready ? "account-ready" : "account-blocked";
+    const action = account.free_plan
+      ? `<button class="btn btn-ghost loop-unlock-account" type="button" data-unlock-account="${escapeHtml(account.name)}">解锁勾选</button>`
+      : "-";
     return `<tr>
       <td class="loop-check-col"><input type="checkbox" data-loop-account value="${escapeHtml(account.name)}" ${ready && selected.has(account.name) ? "checked" : ""} ${ready ? "" : "disabled"} aria-label="${escapeHtml(account.name)} 参与生产"></td>
       <td><b>${escapeHtml(account.name)}</b><small>${escapeHtml(account.mail || "")}</small></td>
@@ -155,8 +158,9 @@ function renderAccounts(snapshot) {
       <td>${Math.max(0, Number(account.quota_remaining) || 0)}</td>
       <td>${escapeHtml(fmtUnix(account.last_produce_at))}</td>
       <td>${escapeHtml(fmtUnix(account.next_produce_at))}</td>
+      <td>${action}</td>
     </tr>`;
-  }).join("") || '<tr><td colspan="8" class="empty">暂无账号</td></tr>';
+  }).join("") || '<tr><td colspan="9" class="empty">暂无账号</td></tr>';
   byId("loopSelectionCount").textContent = `${selectedFromDom().length} 个`;
   rows.querySelectorAll("[data-loop-account]").forEach((input) => {
     input.addEventListener("change", () => {
@@ -166,6 +170,24 @@ function renderAccounts(snapshot) {
       saveConfig(loopState.selectionDraft).catch(() => {});
     });
   });
+  rows.querySelectorAll("[data-unlock-account]").forEach((button) => {
+    button.addEventListener("click", () => unlockAccount(button.dataset.unlockAccount));
+  });
+}
+
+async function unlockAccount(account) {
+  const button = document.querySelector(`[data-unlock-account="${CSS.escape(account)}"]`);
+  if (button) button.disabled = true;
+  try {
+    const snapshot = await api(`/api/production-loop/accounts/${encodeURIComponent(account)}/unlock`, { method: "POST", body: "{}" });
+    loopState.dirty = false;
+    loopState.selectionDraft = null;
+    render(snapshot);
+    toast(`${account} 已解锁，请勾选加入生产池`, "ok");
+  } catch (error) {
+    if (button) button.disabled = false;
+    toast(error.message, "err");
+  }
 }
 
 function renderRuntime(snapshot) {

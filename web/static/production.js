@@ -96,6 +96,15 @@ function renderQuota() {
   byId("productionStart").disabled = !account || blocked || limitReached || remaining <= 0;
 }
 
+function renderFreePlans() {
+  const box = byId("productionFreePlans");
+  const free = state.accounts.filter((account) => account.free_plan);
+  box.classList.toggle("hidden", free.length === 0);
+  box.innerHTML = free.length ? `<span>免费 5 GB 账号已移出生产池：</span>${free.map((account) =>
+    `<button class="btn btn-ghost production-unlock-account" type="button" data-unlock-account="${escapeHtml(account.name)}">解锁勾选 ${escapeHtml(account.name)}</button>`
+  ).join(" ")}` : "";
+}
+
 function renderJobs() {
   const box = byId("productionJobs");
   if (!state.jobs.length) { box.innerHTML = '<div class="empty">暂无生产任务</div>'; return; }
@@ -124,6 +133,19 @@ async function loadOptions() {
   }
   if (selected && state.accounts.some((account) => account.name === selected)) byId("productionAccount").value = selected;
   renderQuota();
+  renderFreePlans();
+}
+
+async function unlockAccount(account, button) {
+  if (button) button.disabled = true;
+  try {
+    await api(`/api/production-loop/accounts/${encodeURIComponent(account)}/unlock`, { method: "POST", body: "{}" });
+    await loadOptions();
+    toast(`${account} 已解锁，请重新选择后生产`, "ok");
+  } catch (error) {
+    if (button) button.disabled = false;
+    toast(error.message, "err");
+  }
 }
 
 async function loadJobs() {
@@ -164,5 +186,9 @@ window.addEventListener(window.UiSettings.eventName, () => {
 byId("productionForm").addEventListener("submit", startProduction);
 byId("productionAccount").addEventListener("change", renderQuota);
 byId("productionRefresh").addEventListener("click", refresh);
+byId("productionFreePlans").addEventListener("click", (event) => {
+  const button = event.target.closest("[data-unlock-account]");
+  if (button) unlockAccount(button.dataset.unlockAccount, button).catch(() => {});
+});
 syncOnOpen().catch((error) => toast(error.message, "err"));
 state.timer = setInterval(loadJobs, 1500);

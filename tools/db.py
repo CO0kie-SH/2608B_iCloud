@@ -1269,6 +1269,32 @@ class AliasDB:
         if flag and flag["free_plan"]:
             raise ICloudFreePlanError(account)
 
+    def clear_account_free_plan(self, account: str) -> dict[str, Any]:
+        """人工解除免费套餐标记，使账号重新允许加入生产池。"""
+        account = (account or "").strip()
+        if not account:
+            raise ValueError("account 不能为空")
+        now = utc_now()
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO account_flags (account, free_plan, plan_name, plan_checked_at, updated_at)
+                VALUES (?, 0, '', 0, ?)
+                ON CONFLICT(account) DO UPDATE SET
+                    free_plan=0,
+                    updated_at=excluded.updated_at
+                """,
+                (account, now),
+            )
+            conn.commit()
+        return self.get_account_flag(account) or {
+            "account": account,
+            "free_plan": False,
+            "plan_name": "",
+            "plan_checked_at": 0,
+            "updated_at": now,
+        }
+
     def get_account_flag(self, account: str) -> dict[str, Any] | None:
         account = (account or "").strip()
         if not account:
